@@ -423,3 +423,15 @@ export function pasteMovements(
   }
   return pasted
 }
+
+/** Número del paso que se está reproduciendo `elapsed` ms después de empezar (el último si ya terminó). */
+export function stepNumberAt(movements: Movement[], elapsed: number): number | null {
+  const steps = prepare(movements)
+  if (steps.length === 0) return null
+  let cursor = 0
+  for (const step of steps) {
+    cursor += step.duration + GAP_MS
+    if (elapsed < cursor) return step.groups[0].moves[0].step
+  }
+  return steps[steps.length - 1].groups[0].moves[0].step
+}

@@ -1,28 +1,41 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import {
-  MODES, SIDES, SIDE_LABELS, SIZE_LIMITS, defaultTeams, getFormation, lineKeys, playerCount, withSize,
+  MODES, SIDES, SIDE_LABELS, SIZE_LIMITS, addCustomFormation, defaultTeams, formationsOf, getFormation, isCustomFormation, removeCustomFormation, lineKeys, playerCount, withSize,
   type Mode, type ModeId, type Side, type Size, type Teams,
 } from './modes'
 import { DEFAULT_ANNOTATION_COLOR, type Annotation, type Tool } from './annotations'
 import DrawToolbar from './DrawToolbar'
+import { clearSession, loadSession, saveSession } from './autosave'
+import type { MiniApi } from './MiniPitch'
+import { passNetwork } from './passes'
+import type { Report } from './report'
+import { prefetchLater, useLazyModule } from './lazy'
+import { buildTokens } from './tokens'
+import type { Command } from './CommandPalette'
+import { ColorField, loadColorPickerParts } from './ColorPicker'
 import Icon from './Icon'
 import { downloadBlob, downloadPng, pickVideoMime, safeName } from './exporting'
 import { encodeGif } from './gif'
 import { LONG_LINK, codeFromLocation, decodeTactic, encodeTactic, shareUrl } from './share'
 import MovementPanel from './MovementPanel'
 import PlaybackBar, { type BarApi } from './PlaybackBar'
-import { tokenColor, type Analysis } from './draw'
-import Pitch, { type PitchApi, type TokenLabel } from './Pitch'
+import { tokenColor, type Analysis, type Region, type ZoneMode } from './draw'
+import { downscaleImage } from './imageUtils'
+import Pitch, { type PitchApi, type TokenInfo } from './Pitch'
 import PlayerPanel from './PlayerPanel'
-import { SIZE_RANGE, defaultColors, defaultRole, keyTitle, parseKey, type LabelMode, type PlayerInfo, type Roster } from './roster'
+import { COLOR_PRESETS, SIZE_RANGE, defaultColors, defaultRole, keyTitle, parseKey, type LabelMode, type PlayerInfo, type Roster } from './roster'
 import { buildHeatmap, type HeatTarget } from './heatmap'
-import { TEMPLATES, type Template } from './templates'
+import { TEMPLATE_META, type TemplateMeta } from './templateMeta'
+import { HISTORY_BURST_MS, HISTORY_LIMIT, sameDoc, type DocState } from './history'
 import SavedTactics from './SavedTactics'
 import Timeline, { type TimelineApi } from './Timeline'
 import Scenes from './Scenes'
+import { formatClock, type SessionItem } from './session'
+import { useShortcuts, usesKeyboard } from './shortcuts'
+import { assignToTeam, infoFromPlayer, loadSquad, saveSquad, syncRoster, type SquadPlayer } from './squad'
 import {
   BALL_KEY, boundaries, canMoveEnd, canRemoveMovement, carrierAt, editMovement, groupSteps, initialPositions,
-  movementStats, paceToSpeed, pasteMovements, positionsAt, removeMovement, straighten, totalDuration,
+  movementStats, paceToSpeed, pasteMovements, positionsAt, removeMovement, stepNumberAt, straighten, totalDuration,
   type MovementEdit,
   type Movement, type PathPoint, type Positions,
 } from './recording'
@@ -33,13 +46,15 @@ import './App.css'
 
 type Status = 'idle' | 'recording' | 'playing'
 
-type PanelTab = 'campo' | 'grabar' | 'seleccion' | 'jugadas' | 'exportar'
+type PanelTab = 'campo' | 'grabar' | 'seleccion' | 'jugadas' | 'plantel' | 'sesion' | 'exportar'
 
 const TABS: { id: PanelTab; label: string; icon: string }[] = [
   { id: 'campo', label: 'Campo', icon: 'sliders' },
   { id: 'grabar', label: 'Grabar', icon: 'record' },
   { id: 'seleccion', label: 'Ficha', icon: 'user' },
   { id: 'jugadas', label: 'Jugadas', icon: 'layers' },
+  { id: 'plantel', label: 'Plantel', icon: 'users' },
+  { id: 'sesion', label: 'Sesión', icon: 'clipboard' },
   { id: 'exportar', label: 'Exportar', icon: 'share' },
 ]
 
@@ -60,6 +75,15 @@ const BALL_OFFSET_M = 1.4
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v))
 
 /** Móviles y tablets: el menú pasa a ser un cajón sobre el terreno. */
+// Piezas que no se ven al abrir la app: se descargan la primera vez que se usan (y, un poco después de arrancar, en segundo plano).
+const loadReportDialog = () => import('./ReportDialog')
+const loadPalette = () => import('./CommandPalette')
+const loadSquadPanel = () => import('./SquadPanel')
+const loadSessionPanel = () => import('./SessionPanel')
+const loadMiniPitch = () => import('./MiniPitch')
+const loadReport = () => import('./report')
+const loadTemplates = () => import('./templates')
+
 const COMPACT_QUERY = '(max-width: 900px), (max-height: 500px)'
 
 interface SceneSlot {
@@ -92,10 +116,36 @@ function App() {
   const [positions, setPositions] = useState<Positions>(() => initialPositions(mode, teams, true))
   const [start, setStart] = useState<Positions>(positions)
   const [movements, setMovements] = useState<Movement[]>([])
-  const [redo, setRedo] = useState<Movement[][]>([])
+  const [notes, setNotes] = useState('')
+  const [stepNotes, setStepNotes] = useState<Record<string, string>>({})
+  const [background, setBackground] = useState<string | null>(null)
+  const [showPasses, setShowPasses] = useState(false)
+  const [compareMode, setCompareMode] = useState<'overlay' | 'split'>('overlay')
+  const [report, setReport] = useState<Report | null>(null)
+  const miniApi = useRef<MiniApi | null>(null)
+  const [squad, setSquad] = useState<SquadPlayer[]>(loadSquad)
+  const [session, setSession] = useState<SessionItem[]>([])
+  /** Sesión en marcha: ejercicio actual y segundos que le quedan. */
+  const [runner, setRunner] = useState<{ index: number; seconds: number } | null>(null)
+  const [zones, setZones] = useState<ZoneMode>('off')
+  const [bgImage, setBgImage] = useState<HTMLImageElement | null>(null)
+  const [fieldView, setFieldView] = useState('full')
+  /** Se incrementa al añadir o quitar formaciones propias, para que las listas se vuelvan a leer. */
+  const [customTick, setCustomTick] = useState(0)
+  const [formationDraft, setFormationDraft] = useState('')
+  const [formationError, setFormationError] = useState<string | null>(null)
+  const captionRef = useRef<HTMLDivElement>(null)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const reportMod = useLazyModule(loadReportDialog, report !== null)
+  const paletteMod = useLazyModule(loadPalette, paletteOpen || shortcutsOpen)
+  const squadMod = useLazyModule(loadSquadPanel, tab === 'plantel')
+  const sessionMod = useLazyModule(loadSessionPanel, tab === 'sesion')
+  /** Altura de la hoja inferior en móvil: media pantalla o casi toda. */
+  const [sheetSnap, setSheetSnap] = useState<'half' | 'full'>('half')
   const [startCarrier, setStartCarrier] = useState<string | null>(null)
   const [measures, setMeasures] = useState(false)
-  const [analysis, setAnalysis] = useState<Analysis>({ lines: false, block: false, coverage: false })
+  const [analysis, setAnalysis] = useState<Analysis>({ lines: false, block: false, coverage: false, control: false })
   const [sequencing, setSequencing] = useState(false)
   const [heatTarget, setHeatTarget] = useState<HeatTarget>('off')
   const [compareIndex, setCompareIndex] = useState<number | null>(null)
@@ -139,6 +189,8 @@ function App() {
   const carrier = carrierAt(startCarrier, movements)
   const ghostData =
     compareIndex !== null && compareIndex !== activeScene ? (scenes[compareIndex]?.data ?? null) : null
+  const splitView = compareMode === 'split' && ghostData !== null
+  const miniMod = useLazyModule(loadMiniPitch, splitView)
 
   const stopSequence = () => {
     clearTimeout(sequenceTimer.current)
@@ -166,10 +218,16 @@ function App() {
       roster?: Roster
       colors?: Record<Side, string>
       annotations?: Annotation[]
+      notes?: string
+      stepNotes?: Record<string, string>
+      background?: string | null
     },
     keepSequence = false,
+    /** Cambios dentro de la misma jugada (formación, empezar a grabar…): se pueden deshacer. */
+    keepHistory = false,
   ) => {
     if (!keepSequence) stopSequence()
+    if (!keepHistory) resetHistory()
     setModeId(next.mode.id)
     setSize(next.size)
     setTeams(next.teams)
@@ -178,12 +236,14 @@ function App() {
     if (next.roster) setRoster(next.roster)
     if (next.colors) setColors(next.colors)
     if (next.annotations) setAnnotations(next.annotations)
+    if (next.notes !== undefined) setNotes(next.notes)
+    if (next.stepNotes) setStepNotes(next.stepNotes)
+    if (next.background !== undefined) setBackground(next.background)
     setSelected(null)
     setSelMove(null)
     setCurrentStep(0)
     setStart(next.start)
     setMovements(next.movements)
-    setRedo([])
     setStatus('idle')
     showEnd(next.movements, next.start)
   }
@@ -205,7 +265,7 @@ function App() {
       start: initialPositions(nextMode, nextTeams, nextBall),
       movements: [],
       roster: changes.roster,
-    })
+    }, false, true)
   }
 
   const selectMode = (id: ModeId) => {
@@ -226,7 +286,7 @@ function App() {
     setTool('select')
     load({
       mode: baseMode, size, teams, ball, carrier: startCarrier, start, movements: [],
-    })
+    }, false, true)
     setStatus('recording')
   }
 
@@ -294,7 +354,6 @@ function App() {
     }
     setPositions((p) => ({ ...p, ...moved }))
     setMovements((m) => [...m, ...added])
-    setRedo([])
   }
 
   /** Edita un movimiento (duración, pausa o recorrido) y deja la jugada en su estado final. */
@@ -303,7 +362,6 @@ function App() {
     const next = editMovement(movements, target, edit, mode)
     if (next === movements) return
     setMovements(next)
-    setRedo([])
     showEnd(next, start)
   }
 
@@ -311,7 +369,6 @@ function App() {
     if (selMoveIndex === null || !canRemoveMovement(movements, selMoveIndex)) return
     const next = removeMovement(movements, selMoveIndex)
     setMovements(next)
-    setRedo([])
     setSelMove(null)
     setCurrentStep(next.length ? next[next.length - 1].step : 0)
     showEnd(next, start)
@@ -334,7 +391,6 @@ function App() {
     if (pasted.length === 0) return
     const next = [...movements, ...pasted]
     setMovements(next)
-    setRedo([])
     setCurrentStep(next[next.length - 1].step)
     showEnd(next, start)
   }
@@ -374,18 +430,21 @@ function App() {
   }
 
   /** Crea una jugada nueva a partir de una plantilla (no toca la actual). */
-  const applyTemplate = (template: Template) => {
+  const applyTemplate = async (meta: TemplateMeta) => {
+    // Los constructores de plantillas se descargan la primera vez que se usan.
+    const template = (await loadTemplates()).TEMPLATES.find((t) => t.id === meta.id)!
     const forced: Teams = {
       left: { ...teams.left, visible: true },
       right: { ...teams.right, visible: true },
     }
     const built = template.build(mode, forced)
     const stashed = stashActive()
-    setScenes([...stashed, { name: template.name, data: null }])
+    setScenes([...stashed, { name: meta.name, data: null }])
     setActiveScene(scenes.length)
     load({
       mode: baseMode, size, teams: forced, ball: true, carrier: built.carrier,
       start: built.start, movements: built.movements, annotations: [],
+      notes: '', stepNotes: {}, background: null,
     })
   }
 
@@ -403,27 +462,98 @@ function App() {
   const newStep = () => setCurrentStep((s) => s + 1)
   const canStartStep = movements.some((m) => m.step === currentStep)
 
+  // ---------- historial: deshacer y rehacer cualquier edición de la jugada activa ----------
+
+  const docNow = (): DocState => ({
+    modeId, size, teams, ball, startCarrier, colors, roster, start, movements, annotations,
+    notes, stepNotes, background,
+  })
+
+  const past = useRef<DocState[]>([])
+  const future = useRef<DocState[]>([])
+  const lastDoc = useRef<DocState | null>(null)
+  /** Estado anterior a la ráfaga de cambios en curso, a la espera de convertirse en un paso de historial. */
+  const burstBase = useRef<DocState | null>(null)
+  const burstTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const [historySize, setHistorySize] = useState({ undo: 0, redo: 0 })
+  const publishHistory = () => setHistorySize({ undo: past.current.length + (burstBase.current ? 1 : 0), redo: future.current.length })
+
+  const flushBurst = () => {
+    clearTimeout(burstTimer.current)
+    if (!burstBase.current) return
+    past.current.push(burstBase.current)
+    if (past.current.length > HISTORY_LIMIT) past.current.shift()
+    future.current = []
+    burstBase.current = null
+    publishHistory()
+  }
+
+  function resetHistory() {
+    clearTimeout(burstTimer.current)
+    burstBase.current = null
+    past.current = []
+    future.current = []
+    lastDoc.current = null
+    setHistorySize({ undo: 0, redo: 0 })
+  }
+
+  /** Pone la jugada en el estado `d` (sin registrar el cambio como una edición nueva). */
+  const restoreDoc = (d: DocState) => {
+    setModeId(d.modeId)
+    setSize(d.size)
+    setTeams(d.teams)
+    setBall(d.ball)
+    setStartCarrier(d.startCarrier)
+    setColors(d.colors)
+    setRoster(d.roster)
+    setStart(d.start)
+    setMovements(d.movements)
+    setAnnotations(d.annotations)
+    setNotes(d.notes)
+    setStepNotes(d.stepNotes)
+    setBackground(d.background)
+    setCurrentStep(d.movements.length ? d.movements[d.movements.length - 1].step : 0)
+    setSelected(null)
+    setSelMove(null)
+    showEnd(d.movements, d.start)
+  }
+
+  // Cada cambio de la jugada se anota; los cambios seguidos (arrastrar un color, teclear un nombre) se juntan.
+  useEffect(() => {
+    const doc = docNow()
+    const previous = lastDoc.current
+    lastDoc.current = doc
+    if (!previous || sameDoc(previous, doc)) return
+    burstBase.current ??= previous
+    publishHistory()
+    clearTimeout(burstTimer.current)
+    burstTimer.current = setTimeout(flushBurst, HISTORY_BURST_MS)
+  }, [modeId, size, teams, ball, startCarrier, colors, roster, start, movements, annotations, notes, stepNotes, background])
+
   const undo = () => {
-    const last = movements[movements.length - 1]
-    if (!last) return
-    // El movimiento del balón generado al llevarlo se deshace junto con el del jugador.
-    const group = last.linked && movements.length > 1 ? movements.slice(-2) : [last]
-    const next = movements.slice(0, movements.length - group.length)
-    setMovements(next)
-    setRedo((r) => [...r, group])
-    setCurrentStep(next.length ? next[next.length - 1].step : 0)
-    showEnd(next, start)
+    if (status === 'playing') return
+    flushBurst()
+    const previous = past.current.pop()
+    if (!previous || !lastDoc.current) return
+    future.current.push(lastDoc.current)
+    lastDoc.current = previous
+    publishHistory()
+    restoreDoc(previous)
   }
 
   const redoLast = () => {
-    const group = redo[redo.length - 1]
-    if (!group) return
-    const next = [...movements, ...group]
-    setMovements(next)
-    setRedo((r) => r.slice(0, -1))
-    setCurrentStep(group[0].step)
-    showEnd(next, start)
+    if (status === 'playing') return
+    flushBurst()
+    const next = future.current.pop()
+    if (!next || !lastDoc.current) return
+    past.current.push(lastDoc.current)
+    lastDoc.current = next
+    publishHistory()
+    restoreDoc(next)
   }
+
+  const canUndo = status !== 'playing' && historySize.undo > 0
+  const canRedo = status !== 'playing' && historySize.redo > 0
 
   const selectSpeed = (value: number) => {
     speedRef.current = value
@@ -479,10 +609,12 @@ function App() {
       elapsedRef.current = t
       pitchApi.current?.draw(
         positionsAt(start, movements, t),
-        ghostData ? positionsAt(ghostData.start, ghostData.movements, t) : null,
+        ghostData && !splitView ? positionsAt(ghostData.start, ghostData.movements, t) : null,
       )
+      if (ghostData && splitView) miniApi.current?.draw(positionsAt(ghostData.start, ghostData.movements, t))
       barApi.current?.update(t)
       timelineApi.current?.update(t)
+      updateCaption(t)
       if (next >= total) {
         const hasNext = sequenceRef.current && activeScene + 1 < scenes.length
         if (!hasNext) stopSequence()
@@ -494,7 +626,7 @@ function App() {
     }
     frame = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(frame)
-  }, [status, start, movements, total, ghostData])
+  }, [status, start, movements, total, ghostData, stepNotes, splitView])
 
   const updateTactics = (next: Tactic[]) => {
     setTactics(next)
@@ -503,6 +635,7 @@ function App() {
 
   const snapshot = (): SceneData => ({
     modeId, size, teams, ball, carrier: startCarrier, colors, roster, start, movements, annotations,
+    notes, stepNotes, background,
   })
 
   const loadScene = (d: SceneData, keepSequence = false) =>
@@ -518,6 +651,9 @@ function App() {
         roster: d.roster,
         colors: d.colors,
         annotations: d.annotations,
+        notes: d.notes,
+        stepNotes: d.stepNotes,
+        background: d.background,
       },
       keepSequence,
     )
@@ -576,6 +712,7 @@ function App() {
     load({
       mode: baseMode, size, teams, ball, carrier: fromEnd ? carrier : null,
       start: begin, movements: [], annotations: [],
+      notes: '', stepNotes: {}, background: fromEnd ? background : null,
     })
   }
 
@@ -591,6 +728,9 @@ function App() {
   const deleteScene = (index: number) => {
     if (scenes.length < 2) return
     setCompareIndex(null)
+    setSession((items) =>
+      items.map((i) => (i.scene === index ? { ...i, scene: null } : i.scene !== null && i.scene > index ? { ...i, scene: i.scene - 1 } : i)),
+    )
     if (index !== activeScene) {
       setScenes(scenes.filter((_, i) => i !== index))
       setActiveScene(index < activeScene ? activeScene - 1 : activeScene)
@@ -610,22 +750,35 @@ function App() {
   const renameScene = (index: number, name: string) =>
     setScenes((list) => list.map((s, i) => (i === index ? { ...s, name } : s)))
 
-  const saveTactic = (name: string) =>
-    updateTactics([
-      {
-        id: crypto.randomUUID(),
-        name,
-        scenes: stashActive().map((s, i) => ({ ...(i === activeScene ? snapshot() : s.data!), name: s.name })),
-        savedAt: Date.now(),
-      },
-      ...tactics,
-    ])
+  /** La táctica completa (todas las jugadas) tal como está ahora. */
+  const currentTactic = (name: string, tags?: string[]): Tactic => ({
+    id: crypto.randomUUID(),
+    name,
+    ...(tags?.length ? { tags } : {}),
+    ...(session.length ? { session } : {}),
+    scenes: stashActive().map((s, i) => ({ ...(i === activeScene ? snapshot() : s.data!), name: s.name })),
+    savedAt: Date.now(),
+  })
 
-  const loadTactic = (t: Tactic) => {
-    setScenes(t.scenes.map((s, i) => ({ name: s.name, data: i === 0 ? null : s })))
-    setActiveScene(0)
-    loadScene(t.scenes[0])
+  const saveTactic = (name: string, tags?: string[]) => updateTactics([currentTactic(name, tags), ...tactics])
+
+  const updateTags = (id: string, tags: string[]) =>
+    updateTactics(tactics.map((t) => (t.id === id ? { ...t, tags } : t)))
+
+  const loadTactic = (t: Tactic, active = 0) => {
+    setSession(t.session ?? [])
+    setRunner(null)
+    setScenes(t.scenes.map((s, i) => ({ name: s.name, data: i === active ? null : s })))
+    setActiveScene(active)
+    loadScene(t.scenes[active])
   }
+
+  // Autoguardado: tras un momento sin cambios se guarda la táctica en curso.
+  useEffect(() => {
+    if (!autosaveReady.current) return
+    const timer = setTimeout(() => saveSession(currentTactic('Sesión'), activeScene), 800)
+    return () => clearTimeout(timer)
+  }, [modeId, size, teams, ball, startCarrier, colors, roster, start, movements, annotations, notes, stepNotes, background, scenes, activeScene, session])
 
   const exportName = safeName(scenes[activeScene].name)
 
@@ -666,12 +819,7 @@ function App() {
 
   /** Copia un enlace que contiene toda la táctica (todas las jugadas) para abrirla en otro dispositivo. */
   const shareLink = async () => {
-    const tactic: Tactic = {
-      id: crypto.randomUUID(),
-      name: scenes.length > 1 ? 'Táctica compartida' : scenes[0].name,
-      scenes: stashActive().map((s, i) => ({ ...(i === activeScene ? snapshot() : s.data!), name: s.name })),
-      savedAt: Date.now(),
-    }
+    const tactic = currentTactic(scenes.length > 1 ? 'Táctica compartida' : scenes[0].name)
     const url = shareUrl(await encodeTactic(tactic))
     try {
       await navigator.clipboard.writeText(url)
@@ -692,6 +840,28 @@ function App() {
   }
 
   /** Abre una táctica compartida si la URL trae `#t=...`; después limpia la URL. */
+  const hasContent = (t: Tactic) => t.scenes.some((s) => s.movements.length > 0 || s.annotations.length > 0 || s.notes)
+
+  /** Empieza de cero: una jugada vacía con la formación por defecto. */
+  const newTactic = () => {
+    if (hasContent(currentTactic('')) && !window.confirm('¿Empezar una táctica nueva? Se descartará el trabajo actual (las tácticas guardadas se conservan).')) return
+    clearSession()
+    const f11 = MODES.find((m) => m.id === 'f11')!
+    const teamsNew = defaultTeams(f11)
+    setSession([])
+    setRunner(null)
+    setScenes([{ name: 'Jugada 1', data: null }])
+    setActiveScene(0)
+    setCompareIndex(null)
+    load({
+      mode: f11, size: null, teams: teamsNew, ball: true, carrier: null,
+      start: initialPositions(f11, teamsNew, true), movements: [], roster: {}, colors: defaultColors(),
+      annotations: [], notes: '', stepNotes: {}, background: null,
+    })
+  }
+
+  const autosaveReady = useRef(false)
+
   const openSharedLink = async () => {
     const code = codeFromLocation()
     if (!code) return
@@ -701,11 +871,21 @@ function App() {
       showNotice('El enlace no contiene una táctica válida.')
       return
     }
+    // Lo que había en pantalla se guarda aparte antes de abrir la táctica compartida.
+    const previous = loadSession()?.tactic
+    if (previous && hasContent(previous)) {
+      updateTactics([{ ...previous, id: crypto.randomUUID(), name: `Sesión anterior (${new Date().toLocaleString('es')})` }, ...tactics])
+    }
     loadTactic(tactic)
     showNotice(`Táctica compartida cargada: ${tactic.name}`)
   }
 
   useEffect(() => {
+    // Recupera el trabajo de la última vez; una táctica compartida (si la hay) se abre después.
+    const saved = loadSession()
+    if (saved) loadTactic(saved.tactic, saved.active)
+    autosaveReady.current = true
+    prefetchLater([loadColorPickerParts, loadReportDialog, loadPalette, loadSquadPanel, loadSessionPanel, loadMiniPitch, loadReport, loadTemplates])
     openSharedLink()
     window.addEventListener('hashchange', openSharedLink)
     const onInstallable = (e: Event) => {
@@ -807,22 +987,10 @@ function App() {
   // Estos objetos solo cambian si cambian sus datos; así el terreno no se redibuja en cada renderizado de la app
   // (por ejemplo, al teclear en un campo o al cambiar el zoom).
   const tokenKeys = Object.keys(positions).join(',')
-  const tokens = useMemo(() => {
-    const result: Record<string, TokenLabel> = {}
-    for (const key of tokenKeys ? tokenKeys.split(',') : []) {
-      if (key === BALL_KEY) continue
-      const { kind, slot } = parseKey(key)
-      const info = roster[key]
-      const isTeam = kind === 'left' || kind === 'right'
-      const role = info?.role ?? (isTeam ? defaultRole(getFormation(baseMode, teams[kind].formationId), slot) : '')
-      result[key] = {
-        text: String(info?.dorsal ?? (isTeam ? slot : kind === 'neutral' ? 'C' : 'Á')),
-        caption: labelMode === 'name' ? (info?.name ?? '') : labelMode === 'role' ? role : '',
-        size: info?.size,
-      }
-    }
-    return result
-  }, [tokenKeys, roster, labelMode, teams, baseMode])
+  const tokens = useMemo(
+    () => buildTokens(tokenKeys ? tokenKeys.split(',') : [], roster, labelMode, teams, baseMode),
+    [tokenKeys, roster, labelMode, teams, baseMode],
+  )
 
   const selectedKey = selected && selected in positions && selected !== BALL_KEY ? selected : null
   const selParsed = selectedKey ? parseKey(selectedKey) : null
@@ -846,6 +1014,39 @@ function App() {
     }[heatTarget]
     return buildHeatmap(start, movements, include)
   }, [heatTarget, start, movements, selectedKey])
+  /** Datos que se enseñan al pasar el ratón por una ficha. */
+  const describeToken = (key: string): TokenInfo | null => {
+    if (key === BALL_KEY) {
+      return {
+        title: 'Balón',
+        lines: status === 'idle' ? [carrier ? `Lo lleva ${labelOf(carrier)}` : 'Libre'] : [],
+      }
+    }
+    const { kind, slot } = parseKey(key)
+    const info = roster[key]
+    const isTeam = kind === 'left' || kind === 'right'
+    const role = info?.role ?? (isTeam ? defaultRole(getFormation(baseMode, teams[kind].formationId), slot) : '')
+    const own = movements.filter((m) => m.key === key)
+    const meters = own.reduce((sum, m) => sum + movementStats(m, mode).distance, 0)
+    const teamName = { left: 'Rojo', right: 'Azul', neutral: 'Comodín', ref: 'Árbitro', ball: 'Balón' }[kind]
+    return {
+      // «DORSAL NOMBRE»; sin nombre, el equipo ocupa su lugar
+      title: `${tokens[key]?.text ?? slot} ${info?.name?.trim() || teamName}`,
+      ...(info?.photo ? { photo: info.photo } : {}),
+      lines: [
+        ...(role ? [role] : []),
+        own.length
+          ? `${own.length} movimiento${own.length === 1 ? '' : 's'} · ${meters.toFixed(1).replace('.', ',')} m`
+          : 'Sin movimientos',
+        ...(status === 'idle' && carrier === key ? ['Lleva el balón'] : []),
+      ],
+    }
+  }
+
+  const network = useMemo(
+    () => (showPasses ? passNetwork(start, movements, startCarrier) : null),
+    [showPasses, start, movements, startCarrier],
+  )
   const selMoveIndex =
     status === 'idle' && !sequencing && selMove !== null && selMove < movements.length
       ? movements[selMove].linked
@@ -888,7 +1089,302 @@ function App() {
         ? 'Reproduciendo'
         : `${stepCount} paso${stepCount === 1 ? '' : 's'} · ${movements.length} mov.`
 
-  const campoTab = (
+  // ---------- plantel ----------
+
+  /** Guarda el plantel y refresca las fichas vinculadas (en la jugada abierta y en las demás). */
+  const updateSquad = (list: SquadPlayer[]) => {
+    setSquad(list)
+    saveSquad(list)
+    setRoster((r) => syncRoster(r, list))
+    setScenes((all) => all.map((s) => (s.data ? { ...s, data: { ...s.data, roster: syncRoster(s.data.roster, list) } } : s)))
+  }
+
+  const assignPlayer = (key: string, player: SquadPlayer | null) =>
+    setRoster((r) => {
+      if (player) return { ...r, [key]: { ...r[key], ...infoFromPlayer(player) } }
+      const { squadId: _link, photo: _photo, ...rest } = r[key] ?? {}
+      return { ...r, [key]: rest }
+    })
+
+  const fillTeam = (side: Side) => {
+    const keys = Object.keys(positions).filter((k) => k.startsWith(`${side}-`))
+    setRoster((r) => assignToTeam(r, squad, keys))
+    showNotice(`Plantel repartido por las fichas del equipo ${SIDE_LABELS[side].toLowerCase()}.`)
+  }
+
+  // ---------- sesión de entrenamiento ----------
+
+  const startSession = () => {
+    if (session.length === 0) return
+    stopSequence()
+    setRunner({ index: 0, seconds: session[0].minutes * 60 })
+  }
+
+  const goToExercise = (index: number) => {
+    const i = Math.min(session.length - 1, Math.max(0, index))
+    setRunner({ index: i, seconds: session[i].minutes * 60 })
+  }
+
+  // Al cambiar de ejercicio se abre la jugada que lo ilustra.
+  useEffect(() => {
+    if (!runner) return
+    const item = session[runner.index]
+    if (item && item.scene !== null && item.scene !== activeScene && item.scene < scenes.length && status === 'idle') switchScene(item.scene)
+  }, [runner?.index])
+
+  // Cronómetro del ejercicio en curso.
+  useEffect(() => {
+    if (!runner) return
+    const timer = setInterval(() => setRunner((r) => (r ? { ...r, seconds: r.seconds - 1 } : r)), 1000)
+    return () => clearInterval(timer)
+  }, [runner === null])
+
+  // La imagen de fondo se decodifica una vez y el terreno la reutiliza.
+  useEffect(() => {
+    if (!background) {
+      setBgImage(null)
+      return
+    }
+    const img = new Image()
+    img.onload = () => setBgImage(img)
+    img.src = background
+  }, [background])
+
+  const chooseBackground = async (file: File) => {
+    try {
+      setBackground(await downscaleImage(file, 1600, { quality: 0.78 }))
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : 'No se pudo abrir la imagen.')
+    }
+  }
+
+  /** Encuadre rápido: medio campo, área… (usa el zoom del terreno; no cambia ninguna posición). */
+  const fitField = (kind: string) => {
+    setFieldView(kind)
+    const depth = (mode.areaDepth + 8) / mode.length
+    const half = (mode.areaWidth / 2 + 6) / mode.width
+    const regions: Record<string, Region> = {
+      left: { x0: 0, x1: 0.5, y0: 0, y1: 1 },
+      right: { x0: 0.5, x1: 1, y0: 0, y1: 1 },
+      'box-left': { x0: 0, x1: depth, y0: 0.5 - half, y1: 0.5 + half },
+      'box-right': { x0: 1 - depth, x1: 1, y0: 0.5 - half, y1: 0.5 + half },
+      center: { x0: 0.3, x1: 0.7, y0: 0, y1: 1 },
+    }
+    if (kind === 'full') pitchApi.current?.resetView()
+    else pitchApi.current?.fit(regions[kind])
+  }
+
+  const addFormation = () => {
+    const result = addCustomFormation(baseMode, formationDraft)
+    if (!result.ok) {
+      setFormationError(result.error)
+      return
+    }
+    setFormationError(null)
+    setFormationDraft('')
+    setCustomTick((n) => n + 1)
+  }
+
+  /** Nota del paso que se muestra ahora (el que se graba o el que se está reproduciendo). */
+  const updateCaption = (t: number) => {
+    const el = captionRef.current
+    if (!el) return
+    const step = status === 'recording' ? currentStep : stepNumberAt(movements, t)
+    const note = step === null ? '' : (stepNotes[String(step)] ?? '')
+    el.hidden = !note
+    if (note) el.textContent = `Paso ${step! + 1}: ${note}`
+  }
+  useEffect(() => {
+    if (status !== 'playing') updateCaption(elapsed)
+  }, [elapsed, movements, stepNotes, status, currentStep])
+
+  /** Resumen numérico de la jugada que se está viendo. */
+  const openReport = async () => {
+    const { buildReport } = await loadReport()
+    setReport(
+      buildReport({
+        name: scenes[activeScene].name, baseMode, mode, teams, roster, start, movements, startCarrier, notes, stepNotes,
+      }),
+    )
+  }
+
+  // ---------- atajos de teclado y paleta de comandos ----------
+
+  const TOOL_KEYS: Tool[] = ['select', 'arrow', 'free', 'curve', 'zone', 'ellipse', 'cone', 'text', 'erase']
+
+  const enterPresentation = () => {
+    setSelected(null)
+    setSelMove(null)
+    setPresenting(true)
+  }
+
+  const onShortcut = (e: KeyboardEvent): boolean => {
+    const mod = e.ctrlKey || e.metaKey
+    const key = e.key.toLowerCase()
+    if (mod && key === 'k') {
+      setPaletteOpen((open) => !open)
+      return true
+    }
+    if (paletteOpen || shortcutsOpen) return false
+    if (mod && key === 's') {
+      saveTactic(scenes.length > 1 ? 'Táctica' : scenes[activeScene].name)
+      showNotice('Táctica guardada en la biblioteca.')
+      return true
+    }
+    if (usesKeyboard(e.target)) return false
+    if (mod && key === 'z') {
+      if (e.shiftKey) redoLast()
+      else undo()
+      return true
+    }
+    if (mod && key === 'y') {
+      redoLast()
+      return true
+    }
+    if (mod || e.altKey) return false
+    const onButton = e.target instanceof HTMLElement && !!e.target.closest('button, [role="tab"]')
+    if (e.key === ' ') {
+      if (onButton || total === 0 || status === 'recording' || sequencing) return false
+      togglePlay()
+      return true
+    }
+    if (/^[1-9]$/.test(e.key)) {
+      setTool(TOOL_KEYS[Number(e.key) - 1])
+      return true
+    }
+    switch (e.key) {
+      case 'ArrowLeft':
+      case 'ArrowRight':
+        if (status === 'recording' || total === 0) return false
+        step(e.key === 'ArrowLeft' ? -1 : 1)
+        return true
+      case 'Delete':
+      case 'Backspace':
+        if (selMoveIndex !== null && canRemoveMovement(movements, selMoveIndex)) removeSelectedMovement()
+        else if (selectedKey && placeable(selectedKey)) removeToken(selectedKey)
+        else return false
+        return true
+      case 'Escape':
+        if (presenting) setPresenting(false)
+        else {
+          setTool('select')
+          setSelected(null)
+          setSelMove(null)
+        }
+        return true
+      case '+':
+      case '=':
+        pitchApi.current?.zoomBy(1.5)
+        return true
+      case '-':
+        pitchApi.current?.zoomBy(1 / 1.5)
+        return true
+      case '0':
+        pitchApi.current?.resetView()
+        return true
+      case '?':
+        setShortcutsOpen(true)
+        return true
+    }
+    switch (key) {
+      case 'g':
+        if (status === 'recording') stopRecording()
+        else if (!busy) startRecording()
+        else return false
+        return true
+      case 'n':
+        if (status !== 'recording' || !canStartStep) return false
+        newStep()
+        return true
+      case 'p':
+        if (presenting) setPresenting(false)
+        else enterPresentation()
+        return true
+      case 'f':
+        toggleFullscreen()
+        return true
+    }
+    return false
+  }
+  useShortcuts(onShortcut)
+
+  const buildCommands = (): Command[] => {
+    const list: Command[] = []
+    const add = (group: string, label: string, run: () => void, extra: Partial<Command> = {}) =>
+      list.push({ id: `${group}:${label}`, group, label, run, ...extra })
+
+    add('Grabación', status === 'recording' ? 'Finalizar grabación' : 'Grabar', () => (status === 'recording' ? stopRecording() : startRecording()), {
+      hint: 'G', disabled: status !== 'recording' && busy, keywords: 'grabar movimiento',
+    })
+    add('Grabación', 'Nuevo paso', newStep, { hint: 'N', disabled: status !== 'recording' || !canStartStep })
+    add('Grabación', 'Deshacer', undo, { hint: 'Ctrl Z', disabled: !canUndo })
+    add('Grabación', 'Rehacer', redoLast, { hint: 'Ctrl Mayús Z', disabled: !canRedo })
+    add('Reproducción', status === 'playing' ? 'Pausar' : 'Reproducir', togglePlay, { hint: 'Espacio', disabled: total === 0 || status === 'recording' })
+    if (scenes.length > 1) add('Reproducción', 'Reproducir todas las jugadas', startSequence, { disabled: busy })
+    add('Reproducción', 'Modo presentación', enterPresentation, { hint: 'P' })
+
+    for (const [id, label] of [['campo', 'Campo'], ['grabar', 'Grabar'], ['seleccion', 'Ficha'], ['jugadas', 'Jugadas'], ['exportar', 'Exportar']] as const) {
+      add('Ir a', `Pestaña ${label}`, () => openTab(id))
+    }
+    for (const m of MODES) add('Modalidad', m.label, () => selectMode(m.id), { disabled: busy, keywords: 'campo terreno' })
+    for (const t of TEMPLATE_META) add('Plantillas', t.name, () => applyTemplate(t), { disabled: busy, keywords: t.description })
+    add('Jugadas', 'Nueva jugada', () => addScene(false), { disabled: busy })
+    add('Jugadas', 'Continuar desde el final', () => addScene(true), { disabled: busy })
+    add('Jugadas', 'Duplicar jugada', duplicateScene, { disabled: busy })
+    scenes.forEach((s, i) => {
+      if (i !== activeScene) add('Jugadas', `Ir a la jugada ${i + 1}: ${s.name}`, () => switchScene(i), { disabled: busy })
+    })
+    tactics.forEach((t) => add('Biblioteca', `Abrir «${t.name}»`, () => loadTactic(t), { disabled: busy, keywords: 'cargar táctica guardada' }))
+    add('Archivo', 'Guardar la táctica', () => {
+      saveTactic(scenes.length > 1 ? 'Táctica' : scenes[activeScene].name)
+      showNotice('Táctica guardada en la biblioteca.')
+    }, { hint: 'Ctrl S' })
+    add('Archivo', 'Táctica nueva', newTactic, { disabled: busy })
+    add('Exportar', 'Informe de la jugada', openReport, { keywords: 'resumen estadísticas metros velocidad pases' })
+    add('Exportar', 'Imagen PNG', exportPng)
+    add('Exportar', 'Vídeo de la jugada', () => exportVideo(), { disabled: busy || total === 0 || !pickVideoMime() })
+    add('Exportar', 'GIF animado', exportGif, { disabled: busy || total === 0 })
+    add('Exportar', 'Copiar enlace para compartir', shareLink)
+    add('Vista', 'Acercar', () => pitchApi.current?.zoomBy(1.5), { hint: '+' })
+    add('Vista', 'Alejar', () => pitchApi.current?.zoomBy(1 / 1.5), { hint: '−' })
+    add('Vista', 'Ver el terreno entero', () => pitchApi.current?.resetView(), { hint: '0' })
+    add('Vista', 'Pantalla completa', toggleFullscreen, { hint: 'F' })
+    add('Vista', showTrails ? 'Ocultar trayectorias' : 'Mostrar trayectorias', () => setShowTrails((v) => !v))
+    add('Vista', showTimeline ? 'Ocultar línea de tiempo por jugador' : 'Mostrar línea de tiempo por jugador', () => setShowTimeline((v) => !v))
+    if (session.length > 0) add('Sesión', runner ? 'Terminar la sesión' : 'Iniciar la sesión de entrenamiento', runner ? () => setRunner(null) : startSession)
+    add('Ir a', 'Pestaña Plantel', () => openTab('plantel'))
+    add('Ir a', 'Pestaña Sesión', () => openTab('sesion'))
+    add('Ayuda', 'Ver atajos de teclado', () => setShortcutsOpen(true), { hint: '?' })
+    return list
+  }
+  const commands = paletteOpen ? buildCommands() : []
+
+  const gripDown = (e: PointerEvent) => {
+    const grip = e.currentTarget as HTMLElement
+    const body = grip.closest('.panel-body') as HTMLElement
+    const startY = e.clientY
+    const startH = body.offsetHeight
+    const full = innerHeight - 7 * 16
+    const half = Math.min(innerHeight * 0.46, 24 * 16)
+    grip.setPointerCapture(e.pointerId)
+    const move = (ev: PointerEvent) => {
+      body.style.height = `${Math.min(full, Math.max(56, startH + startY - ev.clientY))}px`
+    }
+    const up = () => {
+      grip.removeEventListener('pointermove', move)
+      grip.removeEventListener('pointerup', up)
+      grip.removeEventListener('pointercancel', up)
+      const h = body.offsetHeight
+      body.style.height = ''
+      if (h < half * 0.55) setPanelOpen(false)
+      else setSheetSnap(h > (half + full) / 2 ? 'full' : 'half')
+    }
+    grip.addEventListener('pointermove', move)
+    grip.addEventListener('pointerup', up)
+    grip.addEventListener('pointercancel', up)
+  }
+
+  const campoTab = () => (
     <>
       <section>
         <h3>Modalidad</h3>
@@ -955,11 +1451,13 @@ function App() {
                 />
                 <span>{SIDE_LABELS[side]}</span>
               </label>
-              <input
-                type="color"
-                aria-label={`Color ${SIDE_LABELS[side]}`}
+              <ColorField
+                label={`Color ${SIDE_LABELS[side]}`}
                 value={colors[side]}
-                onInput={(e) => setColors((c) => ({ ...c, [side]: e.currentTarget.value }))}
+                alpha={false}
+                align="end"
+                presets={COLOR_PRESETS}
+                onValueChange={(v) => setColors((c) => ({ ...c, [side]: v }))}
               />
               <select
                 aria-label={`Formación ${SIDE_LABELS[side]}`}
@@ -967,13 +1465,53 @@ function App() {
                 disabled={busy || !teams[side].visible}
                 onChange={(e) => updateTeam(side, { formationId: e.currentTarget.value })}
               >
-                {mode.formations.map((f) => (
-                  <option key={f.id} value={f.id}>{f.id}</option>
+                {formationsOf(baseMode).map((f) => (
+                  <option key={f.id} value={f.id}>{f.id}{isCustomFormation(baseMode, f.id) ? ' (propia)' : ''}</option>
                 ))}
               </select>
             </div>
           ))}
         </div>
+        <form
+          className="save-form"
+          onSubmit={(e) => {
+            e.preventDefault()
+            addFormation()
+          }}
+        >
+          <input
+            type="text"
+            aria-label="Formación propia"
+            placeholder={`Formación propia, ej. ${baseMode.formations[0].id}`}
+            value={formationDraft}
+            maxLength={12}
+            onInput={(e) => setFormationDraft(e.currentTarget.value)}
+          />
+          <button type="submit" className="btn btn-sm">Añadir</button>
+        </form>
+        {formationError && <p className="hint error">{formationError}</p>}
+        {customTick >= 0 && formationsOf(baseMode).some((f) => isCustomFormation(baseMode, f.id)) && (
+          <div className="chips">
+            {formationsOf(baseMode)
+              .filter((f) => isCustomFormation(baseMode, f.id))
+              .map((f) => (
+                <span key={f.id} className="badge">
+                  {f.id}
+                  <button
+                    type="button"
+                    className="chip-x"
+                    aria-label={`Quitar la formación ${f.id}`}
+                    onClick={() => {
+                      removeCustomFormation(baseMode, f.id)
+                      setCustomTick((n) => n + 1)
+                    }}
+                  >
+                    <Icon name="x" />
+                  </button>
+                </span>
+              ))}
+          </div>
+        )}
       </section>
 
       <section>
@@ -1015,6 +1553,14 @@ function App() {
             <span>Cobertura</span>
           </label>
           <label className="check">
+            <input type="checkbox" checked={analysis.control} onChange={(e) => setAnalysis({ ...analysis, control: e.currentTarget.checked })} />
+            <span>Espacio controlado</span>
+          </label>
+          <label className="check">
+            <input type="checkbox" checked={showPasses} onChange={(e) => setShowPasses(e.currentTarget.checked)} />
+            <span>Red de pases</span>
+          </label>
+          <label className="check">
             <input type="checkbox" checked={showTimeline} onChange={(e) => setShowTimeline(e.currentTarget.checked)} />
             <span>Línea de tiempo por jugador</span>
           </label>
@@ -1029,11 +1575,51 @@ function App() {
             </select>
           </label>
           <label className="check">
+            <span>Zonas tácticas</span>
+            <select value={zones} onChange={(e) => setZones(e.currentTarget.value as ZoneMode)}>
+              <option value="off">Ninguna</option>
+              <option value="lanes">Carriles</option>
+              <option value="thirds">Tercios</option>
+              <option value="grid">Carriles y tercios</option>
+            </select>
+          </label>
+          <label className="check">
+            <span>Encuadre</span>
+            <select value={fieldView} onChange={(e) => fitField(e.currentTarget.value)}>
+              <option value="full">Campo completo</option>
+              <option value="left">Mitad roja</option>
+              <option value="right">Mitad azul</option>
+              <option value="box-left">Área roja</option>
+              <option value="box-right">Área azul</option>
+              <option value="center">Zona central</option>
+            </select>
+          </label>
+          <div className="check">
+            <span>Fondo</span>
+            <span className="row">
+              <label className="btn btn-sm file-btn">
+                Imagen…
+                <input
+                  type="file"
+                  accept="image/*"
+                  hidden
+                  onChange={(e) => {
+                    const file = e.currentTarget.files?.[0]
+                    if (file) chooseBackground(file)
+                    e.currentTarget.value = ''
+                  }}
+                />
+              </label>
+              <button type="button" className="btn btn-sm" disabled={!background} onClick={() => setBackground(null)}>Quitar</button>
+            </span>
+          </div>
+          <label className="check">
             <span>Etiquetas</span>
             <select value={labelMode} onChange={(e) => setLabelMode(e.currentTarget.value as LabelMode)}>
               <option value="none">Ninguna</option>
               <option value="name">Nombre</option>
               <option value="role">Posición</option>
+              <option value="photo">Foto en la ficha</option>
             </select>
           </label>
         </div>
@@ -1041,7 +1627,7 @@ function App() {
     </>
   )
 
-  const grabarTab = (
+  const grabarTab = () => (
     <>
       <section>
         <h3>Movimientos</h3>
@@ -1062,10 +1648,10 @@ function App() {
             </button>
           )}
           <div className="row">
-            <button type="button" className="btn" disabled={status === 'playing' || movements.length === 0} onClick={undo}>
+            <button type="button" className="btn" disabled={!canUndo} onClick={undo}>
               <Icon name="undo" />Deshacer
             </button>
-            <button type="button" className="btn" disabled={status === 'playing' || redo.length === 0} onClick={redoLast}>
+            <button type="button" className="btn" disabled={!canRedo} onClick={redoLast}>
               <Icon name="redo" />Rehacer
             </button>
           </div>
@@ -1093,6 +1679,34 @@ function App() {
             <Icon name="trash" />Limpiar
           </button>
         </div>
+      </section>
+      <section>
+        <h3>Notas por paso</h3>
+        <div className="step-notes">
+          {[...new Set([...movements.map((m) => m.step), ...(status === 'recording' ? [currentStep] : [])])]
+            .sort((x, y) => x - y)
+            .map((n) => (
+              <label key={n}>
+                <span>Paso {n + 1}</span>
+                <input
+                  type="text"
+                  placeholder="Qué ocurre en este paso"
+                  maxLength={400}
+                  value={stepNotes[String(n)] ?? ''}
+                  onInput={(e) => {
+                    const text = e.currentTarget.value
+                    setStepNotes((prev) => {
+                      const next = { ...prev }
+                      if (text) next[String(n)] = text
+                      else delete next[String(n)]
+                      return next
+                    })
+                  }}
+                />
+              </label>
+            ))}
+        </div>
+        <p className="hint">Se muestran sobre el terreno al reproducir la jugada.</p>
       </section>
       <section>
         <h3>Velocidad</h3>
@@ -1124,7 +1738,7 @@ function App() {
     </>
   )
 
-  const seleccionTab = (
+  const seleccionTab = () => (
     <>
       {selectedKey && selParsed && (
         <PlayerPanel
@@ -1144,6 +1758,8 @@ function App() {
           removeBlocked={placeable(selectedKey) ? null : 'Tiene movimientos grabados: bórralos antes'}
           onGiveBall={() => giveBall(selectedKey)}
           onRemove={() => removeToken(selectedKey)}
+          squad={squad}
+          onAssignPlayer={(id) => assignPlayer(selectedKey, squad.find((p) => p.id === id) ?? null)}
           onChange={(patch) => updateInfo(selectedKey, patch)}
           onReset={() =>
             setRoster((r) => {
@@ -1191,8 +1807,28 @@ function App() {
     </>
   )
 
-  const jugadasTab = (
+  const jugadasTab = () => (
     <>
+      <section>
+        <h3>Notas de la jugada</h3>
+        <textarea
+          aria-label="Notas de la jugada"
+          placeholder="Objetivo, consignas, qué vigilar…"
+          rows={3}
+          maxLength={2000}
+          value={notes}
+          onInput={(e) => setNotes(e.currentTarget.value)}
+        />
+      </section>
+      <section>
+        <h3>Táctica</h3>
+        <div className="row">
+          <button type="button" className="btn" disabled={busy} onClick={newTactic}>
+            <Icon name="plus" />Táctica nueva
+          </button>
+        </div>
+        <p className="hint">Tu trabajo se guarda solo en este dispositivo y se recupera al volver.</p>
+      </section>
       <Scenes
         names={scenes.map((s) => s.name)}
         active={activeScene}
@@ -1210,12 +1846,14 @@ function App() {
         onDuplicate={duplicateScene}
         compareIndex={compareIndex}
         onCompare={setCompareIndex}
+        compareMode={compareMode}
+        onCompareMode={setCompareMode}
         onRename={renameScene}
       />
       <section>
         <h3>Plantillas</h3>
         <div className="controls">
-          {TEMPLATES.map((t) => (
+          {TEMPLATE_META.map((t) => (
             <button key={t.id} type="button" className="btn" disabled={busy} title={t.description} onClick={() => applyTemplate(t)}>
               {t.name}
             </button>
@@ -1227,6 +1865,7 @@ function App() {
         tactics={tactics}
         disabled={busy}
         onSave={saveTactic}
+        onTags={updateTags}
         onLoad={loadTactic}
         onDelete={(id) => updateTactics(tactics.filter((t) => t.id !== id))}
         onExport={downloadTactic}
@@ -1235,7 +1874,34 @@ function App() {
     </>
   )
 
-  const exportarTab = (
+  const SquadPanel = squadMod?.default
+  const SessionPanel = sessionMod?.default
+  const plantelTab = () => !SquadPanel ? <p className="empty">Cargando…</p> : (
+    <SquadPanel
+      squad={squad}
+      selectedKey={selectedKey}
+      disabled={busy}
+      onChange={updateSquad}
+      onAssign={(player) => selectedKey && assignPlayer(selectedKey, player)}
+      onFillTeam={fillTeam}
+      onNotice={showNotice}
+    />
+  )
+
+  const sesionTab = () => !SessionPanel ? <p className="empty">Cargando…</p> : (
+    <SessionPanel
+      items={session}
+      sceneNames={scenes.map((s) => s.name)}
+      activeScene={activeScene}
+      disabled={busy}
+      running={runner !== null}
+      onChange={setSession}
+      onStart={startSession}
+      onGoTo={(i) => switchScene(i)}
+    />
+  )
+
+  const exportarTab = () => (
     <section>
       <h3>Exportar</h3>
       <div className="controls">
@@ -1271,6 +1937,9 @@ function App() {
         >
           <Icon name="image" />{gifProgress === null ? 'GIF animado' : `Generando GIF… ${Math.round(gifProgress * 100)}%`}
         </button>
+        <button type="button" className="btn" title="Recorridos, velocidades, pases, espacio controlado y distancias entre líneas" onClick={openReport}>
+          <Icon name="clipboard" />Informe de la jugada
+        </button>
         <button type="button" className="btn" title="Copia un enlace con toda la táctica" onClick={shareLink}>
           <Icon name="link" />Copiar enlace para compartir
         </button>
@@ -1283,11 +1952,17 @@ function App() {
     </section>
   )
 
-  const tabContent = { campo: campoTab, grabar: grabarTab, seleccion: seleccionTab, jugadas: jugadasTab, exportar: exportarTab }[tab]
+  const MiniPitch = miniMod?.default
+  const ReportDialog = reportMod?.default
+  const CommandPalette = paletteMod?.CommandPalette
+  const ShortcutsDialog = paletteMod?.ShortcutsDialog
+
+  // Solo se construye la pestaña visible.
+  const tabContent = { campo: campoTab, grabar: grabarTab, seleccion: seleccionTab, jugadas: jugadasTab, plantel: plantelTab, sesion: sesionTab, exportar: exportarTab }[tab]()
 
   return (
     <div className={`app${presenting ? ' presenting' : ''}`}>
-      <main className="stage">
+      <main className={`stage${splitView ? ' split' : ''}`}>
         <Pitch
           mode={mode}
           positions={positions}
@@ -1298,7 +1973,7 @@ function App() {
           selected={selectedKey}
           heat={heat}
           ghost={
-            ghostData
+            ghostData && !splitView
               ? {
                   positions: positionsAt(ghostData.start, ghostData.movements, elapsed),
                   trails: showTrails ? ghostData.movements : [],
@@ -1308,9 +1983,13 @@ function App() {
           placeable={placeable}
           onPlace={placeToken}
           onZoomChange={setZoom}
+          describe={describeToken}
           carrier={status === 'playing' || gifProgress !== null ? null : carrier}
           measures={measures && showTrails}
           analysis={analysis}
+          zones={zones}
+          network={network}
+          background={bgImage}
           groups={groups}
           canvasRef={canvasRef}
           apiRef={pitchApi}
@@ -1332,6 +2011,21 @@ function App() {
           onEditPath={(i, points) => applyEdit(i, { points })}
           onDrop={handleDrop}
         />
+
+        {splitView && ghostData && MiniPitch && (
+          <>
+            <MiniPitch
+              baseMode={MODES.find((m) => m.id === ghostData.modeId)!}
+              mode={withSize(MODES.find((m) => m.id === ghostData.modeId)!, ghostData.size)}
+              data={ghostData}
+              elapsed={elapsed}
+              showTrails={showTrails}
+              labelMode={labelMode}
+              apiRef={miniApi}
+            />
+            <span className="split-title glass">Comparando con: {scenes[compareIndex!]?.name}</span>
+          </>
+        )}
 
         <header className="hud hud-title glass">
           <span className="brand">Tactiker</span>
@@ -1366,15 +2060,18 @@ function App() {
               <Icon name="step" />
             </button>
           )}
-          <button type="button" className="btn btn-ghost btn-icon" aria-label="Deshacer" title="Deshacer" disabled={status === 'playing' || movements.length === 0} onClick={undo}>
+          <button type="button" className="btn btn-ghost btn-icon" aria-label="Deshacer" title="Deshacer" disabled={!canUndo} onClick={undo}>
             <Icon name="undo" />
           </button>
-          <button type="button" className="btn btn-ghost btn-icon" aria-label="Rehacer" title="Rehacer" disabled={status === 'playing' || redo.length === 0} onClick={redoLast}>
+          <button type="button" className="btn btn-ghost btn-icon" aria-label="Rehacer" title="Rehacer" disabled={!canRedo} onClick={redoLast}>
             <Icon name="redo" />
           </button>
         </div>
 
         <div className="hud hud-view glass" role="group" aria-label="Vista del terreno">
+          <button type="button" className="btn btn-ghost btn-icon" aria-label="Paleta de comandos" title="Paleta de comandos (Ctrl K)" onClick={() => setPaletteOpen(true)}>
+            <Icon name="search" />
+          </button>
           <button type="button" className="btn btn-ghost btn-icon" aria-label="Acercar" title="Acercar (o rueda del ratón / pellizco)" onClick={() => pitchApi.current?.zoomBy(1.5)}>
             <Icon name="zoom-in" />
           </button>
@@ -1409,6 +2106,37 @@ function App() {
           </button>
         )}
 
+        <div ref={captionRef} className="caption glass" hidden role="status" />
+
+        {runner && session[runner.index] && (
+          <aside className="session-card glass" aria-label="Sesión en curso">
+            <div className="row between">
+              <span className="badge">Ejercicio {runner.index + 1} de {session.length}</span>
+              <span className={`session-clock${runner.seconds < 0 ? ' over' : ''}`} aria-live="off">{formatClock(runner.seconds)}</span>
+            </div>
+            <strong>{session[runner.index].title}</strong>
+            {session[runner.index].objective && <p>{session[runner.index].objective}</p>}
+            {session[runner.index].material.length > 0 && (
+              <div className="chips">
+                {session[runner.index].material.map((m) => <span key={m} className="badge">{m}</span>)}
+              </div>
+            )}
+            {session[runner.index].notes && <p className="hint">{session[runner.index].notes}</p>}
+            <div className="row">
+              <button type="button" className="btn btn-ghost btn-icon btn-sm" aria-label="Ejercicio anterior" disabled={runner.index === 0} onClick={() => goToExercise(runner.index - 1)}>
+                <Icon name="back" />
+              </button>
+              <button type="button" className="btn btn-sm" disabled={total === 0 || status === 'recording'} onClick={togglePlay}>
+                <Icon name={status === 'playing' ? 'pause' : 'play'} />Jugada
+              </button>
+              <button type="button" className="btn btn-ghost btn-icon btn-sm" aria-label="Ejercicio siguiente" disabled={runner.index === session.length - 1} onClick={() => goToExercise(runner.index + 1)}>
+                <Icon name="fwd" />
+              </button>
+              <button type="button" className="btn btn-sm" onClick={() => setRunner(null)}>Terminar</button>
+            </div>
+          </aside>
+        )}
+
         {notice && (
           <div className="toast glass" role="status">
             <Icon name="check" />
@@ -1426,7 +2154,7 @@ function App() {
         )}
       </main>
 
-      <aside className="panel glass" data-open={panelOpen} aria-label="Panel de edición">
+      <aside className="panel glass" data-open={panelOpen} data-snap={sheetSnap} aria-label="Panel de edición">
         <div className="panel-head">
           <div className="tabs" role="tablist" aria-label="Secciones">
             {TABS.map((t) => (
@@ -1448,6 +2176,7 @@ function App() {
           </div>
         </div>
         <div className="panel-body" role="tabpanel" key={tab}>
+          <div className="sheet-grip" onPointerDown={gripDown} role="separator" aria-label="Arrastra para cambiar la altura del panel"><i /></div>
           {tabContent}
         </div>
       </aside>
@@ -1484,6 +2213,9 @@ function App() {
           onSpeed={selectSpeed}
         />
       </footer>
+      {CommandPalette && <CommandPalette open={paletteOpen} commands={commands} onClose={() => setPaletteOpen(false)} />}
+      {ShortcutsDialog && <ShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />}
+      {ReportDialog && <ReportDialog report={report} onClose={() => setReport(null)} onNotice={showNotice} />}
     </div>
   )
 }

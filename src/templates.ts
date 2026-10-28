@@ -12,8 +12,6 @@ export interface TemplateResult {
 
 export interface Template {
   id: string
-  name: string
-  description: string
   build: (mode: Mode, teams: Teams) => TemplateResult
 }
 
@@ -82,6 +80,15 @@ class Builder {
     this.startCarrier = key
   }
 
+  /** Posición actual (tras los movimientos ya encadenados) de una ficha. */
+  startX(key: string) {
+    return this.current[key]?.x ?? 0.5
+  }
+
+  startY(key: string) {
+    return this.current[key]?.y ?? 0.5
+  }
+
   nextStep() {
     this.step++
   }
@@ -138,8 +145,6 @@ const spread = (n: number, i: number) => (i + 1) / (n + 1)
 export const TEMPLATES: Template[] = [
   {
     id: 'corner',
-    name: 'Córner a favor',
-    description: 'El rojo saca un córner por la derecha, con desmarques al primer palo y remate.',
     build: (mode, teams) => {
       const b = new Builder(mode, teams)
       const [taker, ...rest] = b.attackers.length > 5 ? [b.attackers[5], ...b.attackers.slice(0, 5)] : b.attackers
@@ -167,8 +172,6 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: 'throw-in',
-    name: 'Saque de banda',
-    description: 'El rojo saca de banda arriba; un compañero se ofrece, recibe y sigue la jugada.',
     build: (mode, teams) => {
       const b = new Builder(mode, teams)
       const [a, bb, thrower, c] = [b.attackers[0], b.attackers[1], b.attackers[2] ?? b.attackers[0], b.attackers[3]]
@@ -192,8 +195,6 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: 'buildup',
-    name: 'Salida de balón',
-    description: 'El portero rojo inicia la jugada ante la presión azul y sale jugando por los centrales y el medio.',
     build: (mode, teams) => {
       const b = new Builder(mode, teams)
       const [defense, midfield] = b.redLines
@@ -215,8 +216,6 @@ export const TEMPLATES: Template[] = [
   },
   {
     id: 'counter',
-    name: 'Contraataque 3 contra 2',
-    description: 'Tres rojos salen al contragolpe contra dos defensas azules: conducción, pase y remate.',
     build: (mode, teams) => {
       const b = new Builder(mode, teams)
       const [wing, centre, other] = b.attackers
@@ -238,6 +237,122 @@ export const TEMPLATES: Template[] = [
       b.nextStep()
       b.kick([1.0, 0.5], 600)
       b.run('right-1', [[0.97, 0.45]], 600)
+      return b.result()
+    },
+  },
+  {
+    id: 'high-press',
+    build: (mode, teams) => {
+      const b = new Builder(mode, teams)
+      const [blueDef, blueMid] = b.blueLines
+      const [redDef, redMid] = b.redLines
+      const [a1, a2, a3] = b.attackers
+      b.place('right-1', 0.96, 0.5)
+      b.giveBall('right-1')
+      blueDef?.forEach((k, i) => b.place(k, 0.86, spread(blueDef.length, i)))
+      blueMid?.forEach((k, i) => b.place(k, 0.68, spread(blueMid.length, i)))
+      b.place(a1, 0.78, 0.42)
+      b.place(a2, 0.78, 0.58)
+      b.place(a3, 0.7, 0.5)
+      redMid?.forEach((k, i) => b.place(k, 0.58, spread(redMid.length, i)))
+      redDef?.forEach((k, i) => b.place(k, 0.46, spread(redDef.length, i)))
+      b.run(a1, [[0.88, 0.36]], 1400)
+      b.run(a2, [[0.88, 0.64]], 1400)
+      b.run(a3, [[0.8, 0.5]], 1400)
+      redMid?.forEach((k) => b.run(k, [[0.68, b.startY(k)]], 1400))
+      redDef?.forEach((k) => b.run(k, [[0.56, b.startY(k)]], 1400))
+      b.nextStep()
+      b.kick(blueDef?.[0], 800)
+      b.run(a1, [[0.9, 0.3]], 800)
+      b.nextStep()
+      b.kick(blueDef?.[blueDef.length - 1], 900)
+      b.run(a2, [[0.9, 0.7]], 900)
+      return b.result()
+    },
+  },
+  {
+    id: 'low-block',
+    build: (mode, teams) => {
+      const b = new Builder(mode, teams)
+      const [redDef, redMid] = b.redLines
+      const blueAtk = b.blueLines[b.blueLines.length - 1] ?? []
+      const carrier = blueAtk[0]
+      b.place('left-1', 0.04, 0.5)
+      redDef?.forEach((k, i) => b.place(k, 0.13, spread(redDef.length, i)))
+      redMid?.forEach((k, i) => b.place(k, 0.24, spread(redMid.length, i)))
+      b.attackers.slice(0, 2).forEach((k, i) => b.place(k, 0.34, spread(2, i)))
+      b.place(carrier, 0.44, 0.38)
+      b.giveBall(carrier)
+      b.place(blueAtk[1], 0.34, 0.1)
+      b.dribble(carrier, [[0.4, 0.2]], 1500)
+      for (const k of [...(redDef ?? []), ...(redMid ?? []), ...b.attackers.slice(0, 2)]) b.run(k, [[b.startX(k), b.startY(k) * 0.72]], 1500)
+      b.nextStep()
+      b.kick(blueAtk[1], 1000)
+      for (const k of [...(redDef ?? []), ...(redMid ?? [])]) b.run(k, [[b.startX(k), b.startY(k) * 0.5]], 1000)
+      return b.result()
+    },
+  },
+  {
+    id: 'free-kick',
+    build: (mode, teams) => {
+      const b = new Builder(mode, teams)
+      const [taker, a2, a3] = b.attackers
+      const d = b.blueLines.flat()
+      b.place(taker, 0.8, 0.4)
+      b.giveBall(taker)
+      ;[0.31, 0.35, 0.39, 0.43].forEach((y, i) => b.place(d[i], 0.885, y))
+      b.place('right-1', 0.985, 0.5)
+      b.place(a2, 0.92, 0.55)
+      b.place(a3, 0.9, 0.62)
+      b.run(a2, [[0.95, 0.5]], 900)
+      b.run(a3, [[0.93, 0.42]], 900)
+      b.nextStep()
+      b.kick([1.0, 0.46], 600)
+      b.run('right-1', [[0.985, 0.43]], 600)
+      return b.result()
+    },
+  },
+  {
+    id: 'penalty',
+    build: (mode, teams) => {
+      const b = new Builder(mode, teams)
+      const spot = 1 - (mode.areaDepth * 0.66) / mode.length
+      const edge = 1 - (mode.areaDepth + 2.5) / mode.length
+      const [taker, ...others] = b.attackers
+      b.place(BALL_KEY, spot, 0.5)
+      b.place(taker, spot - 0.045, 0.5)
+      others.slice(0, 5).forEach((k, i) => b.place(k, edge, 0.3 + i * 0.1))
+      b.blueLines.flat().slice(0, 5).forEach((k, i) => b.place(k, edge - 0.012, 0.3 + i * 0.1))
+      b.place('right-1', 0.985, 0.5)
+      b.run(taker, [[spot - 0.012, 0.5]], 900)
+      b.nextStep()
+      b.kick([1.0, 0.43], 450)
+      b.run('right-1', [[0.985, 0.44]], 450)
+      return b.result()
+    },
+  },
+  {
+    id: 'overlap',
+    build: (mode, teams) => {
+      const b = new Builder(mode, teams)
+      const winger = b.redLines[1]?.[0] ?? b.attackers[0]
+      const fullback = b.redLines[0]?.[0] ?? b.attackers[1]
+      const striker = b.attackers[0] === winger ? b.attackers[1] : b.attackers[0]
+      const d = b.blueLines.flat()
+      b.place(winger, 0.6, 0.14)
+      b.giveBall(winger)
+      b.place(fullback, 0.5, 0.1)
+      b.place(striker, 0.84, 0.45)
+      b.place(d[0], 0.7, 0.12)
+      b.place(d[1], 0.9, 0.38)
+      b.place(d[2], 0.9, 0.55)
+      b.dribble(winger, [[0.67, 0.26]], 1500)
+      b.run(fullback, [[0.78, 0.05]], 1500)
+      b.run(striker, [[0.9, 0.46]], 1500)
+      b.nextStep()
+      b.kick(fullback, 800)
+      b.nextStep()
+      b.kick([0.93, 0.46], 800)
       return b.result()
     },
   },

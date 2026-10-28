@@ -1,5 +1,7 @@
 import type { Tool } from './annotations'
+import { ColorField } from './ColorPicker'
 import Icon from './Icon'
+import { COLOR_PRESETS } from './roster'
 
 interface Props {
   tool: Tool
@@ -38,13 +40,7 @@ function DrawToolbar({ tool, color, count, onTool, onColor, onClear }: Props) {
           <Icon name={t.icon} />
         </button>
       ))}
-      <input
-        type="color"
-        aria-label="Color del dibujo"
-        title="Color del dibujo"
-        value={color}
-        onInput={(e) => onColor(e.currentTarget.value)}
-      />
+      <ColorField label="Color del dibujo" value={color} onValueChange={onColor} presets={COLOR_PRESETS} />
       <button
         type="button"
         className="btn btn-ghost btn-icon"

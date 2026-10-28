@@ -99,9 +99,77 @@ export function defaultTeams(mode: Mode): Teams {
   }
 }
 
-export function getFormation(mode: Mode, id: string): Formation {
-  return mode.formations.find((f) => f.id === id) ?? mode.formations[0]
+/** Jugadores de campo (sin portero) de cada equipo en esta modalidad. */
+const outfieldCount = (mode: Mode) => playerCount(mode.formations[0]) - 1
+
+/**
+ * Formación a partir de su identificador (`3-5-2`): vale cualquiera que sume los jugadores de campo de la
+ * modalidad, con entre 2 y 5 líneas de 1 a 9 jugadores. Así las formaciones propias se describen solas.
+ */
+export function parseFormationId(mode: Mode, id: string): Formation | null {
+  if (!/^[1-9](-[1-9]){1,4}$/.test(id)) return null
+  const lines = id.split('-').map(Number)
+  return lines.reduce((a, b) => a + b, 0) === outfieldCount(mode) ? { id, lines: [1, ...lines] } : null
 }
+
+export function getFormation(mode: Mode, id: string): Formation {
+  return mode.formations.find((f) => f.id === id) ?? parseFormationId(mode, id) ?? mode.formations[0]
+}
+
+export const isFormationId = (mode: Mode, id: string) =>
+  mode.formations.some((f) => f.id === id) || parseFormationId(mode, id) !== null
+
+// ---------- formaciones propias (se guardan en este dispositivo) ----------
+
+const CUSTOM_KEY = 'tactiker.formations'
+
+function readCustom(): Partial<Record<ModeId, string[]>> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CUSTOM_KEY) ?? '{}')
+    return typeof raw === 'object' && raw ? raw : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeCustom(all: Partial<Record<ModeId, string[]>>) {
+  try {
+    localStorage.setItem(CUSTOM_KEY, JSON.stringify(all))
+  } catch {
+    // sin almacenamiento: la formación sirve en esta sesión pero no se recuerda
+  }
+}
+
+/** Formaciones de la modalidad: las que trae más las propias. */
+export function formationsOf(mode: Mode): Formation[] {
+  const custom = (readCustom()[mode.id] ?? [])
+    .map((id) => parseFormationId(mode, id))
+    .filter((f): f is Formation => f !== null && !mode.formations.some((b) => b.id === f.id))
+  return [...mode.formations, ...custom]
+}
+
+/** Añade una formación propia escrita como `3-5-2`, `352` o `3 5 2`. */
+export function addCustomFormation(mode: Mode, text: string): { ok: true; id: string } | { ok: false; error: string } {
+  const digits = text.match(/\d/g)
+  const id = text.includes('-') || /[\s,]/.test(text.trim()) ? text.trim().split(/[-\s,]+/).join('-') : digits?.join('-') ?? ''
+  const formation = parseFormationId(mode, id)
+  if (!formation) {
+    return { ok: false, error: `Escribe ${outfieldCount(mode)} jugadores de campo repartidos en 2 a 5 líneas, por ejemplo ${mode.formations[0].id}.` }
+  }
+  if (formationsOf(mode).some((f) => f.id === formation.id)) return { ok: false, error: 'Esa formación ya existe.' }
+  const all = readCustom()
+  all[mode.id] = [...(all[mode.id] ?? []), formation.id]
+  writeCustom(all)
+  return { ok: true, id: formation.id }
+}
+
+export function removeCustomFormation(mode: Mode, id: string) {
+  const all = readCustom()
+  all[mode.id] = (all[mode.id] ?? []).filter((x) => x !== id)
+  writeCustom(all)
+}
+
+export const isCustomFormation = (mode: Mode, id: string) => !mode.formations.some((f) => f.id === id)
 
 export interface Player {
   number: number

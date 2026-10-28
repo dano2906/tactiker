@@ -1,7 +1,8 @@
-import { MODES, SIDES, SIZE_LIMITS, defaultTeams, type ModeId, type Side, type Size, type Teams } from './modes'
+import { MODES, SIDES, SIZE_LIMITS, defaultTeams, isFormationId, type ModeId, type Side, type Size, type Teams } from './modes'
 import { BALL_KEY, type Movement, type PathPoint, type Positions } from './recording'
 import { defaultColors, type Roster } from './roster'
 import type { Annotation } from './annotations'
+import { parseSession, type SessionItem } from './session'
 import { safeName } from './exporting'
 
 const STORAGE_KEY = 'tactiker.tactics'
@@ -20,6 +21,11 @@ export interface SceneData {
   start: Positions
   movements: Movement[]
   annotations: Annotation[]
+  /** Notas de la jugada y notas de cada paso (clave: número de paso). */
+  notes: string
+  stepNotes: Record<string, string>
+  /** Imagen de fondo (data URL) en lugar del césped; no viaja en los enlaces para compartir. */
+  background: string | null
 }
 
 export interface Scene extends SceneData {
@@ -32,6 +38,10 @@ export interface Tactic {
   name: string
   scenes: Scene[]
   savedAt: number
+  /** Etiquetas para encontrarla en la biblioteca. */
+  tags?: string[]
+  /** Sesión de entrenamiento ligada a la táctica. */
+  session?: SessionItem[]
 }
 
 const isNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
@@ -49,6 +59,8 @@ function parsePath(v: unknown): PathPoint[] | null {
 }
 
 const isColor = (v: unknown): v is string => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v)
+/** Color de dibujo: puede llevar transparencia (#rrggbbaa). */
+const isColorAlpha = (v: unknown): v is string => typeof v === 'string' && /^#[0-9a-f]{6}([0-9a-f]{2})?$/i.test(v)
 
 function parseAnnotations(v: unknown): Annotation[] {
   if (!Array.isArray(v)) return []
@@ -56,25 +68,40 @@ function parseAnnotations(v: unknown): Annotation[] {
   for (const a of v) {
     if (!isRecord(a)) continue
     const id = typeof a.id === 'string' ? a.id : crypto.randomUUID()
-    if ((a.kind === 'arrow' || a.kind === 'zone') && isColor(a.color) &&
+    if ((a.kind === 'arrow' || a.kind === 'zone') && isColorAlpha(a.color) &&
         isNumber(a.x1) && isNumber(a.y1) && isNumber(a.x2) && isNumber(a.y2)) {
       result.push({ id, kind: a.kind, x1: a.x1, y1: a.y1, x2: a.x2, y2: a.y2, color: a.color })
-    } else if (a.kind === 'ellipse' && isColor(a.color) &&
+    } else if (a.kind === 'ellipse' && isColorAlpha(a.color) &&
                isNumber(a.x1) && isNumber(a.y1) && isNumber(a.x2) && isNumber(a.y2)) {
       result.push({ id, kind: 'ellipse', x1: a.x1, y1: a.y1, x2: a.x2, y2: a.y2, color: a.color })
-    } else if (a.kind === 'free' && isColor(a.color) && Array.isArray(a.points) && a.points.length >= 2) {
+    } else if (a.kind === 'free' && isColorAlpha(a.color) && Array.isArray(a.points) && a.points.length >= 2) {
       const points = a.points
         .filter((p): p is { x: number; y: number } => isRecord(p) && isNumber(p.x) && isNumber(p.y))
         .map((p) => ({ x: p.x, y: p.y }))
       if (points.length >= 2) result.push({ id, kind: 'free', points, arrow: a.arrow === true, color: a.color })
     } else if (a.kind === 'cone' && isNumber(a.x) && isNumber(a.y)) {
       result.push({ id, kind: 'cone', x: a.x, y: a.y })
-    } else if (a.kind === 'text' && isColor(a.color) && isNumber(a.x) && isNumber(a.y) &&
+    } else if (a.kind === 'text' && isColorAlpha(a.color) && isNumber(a.x) && isNumber(a.y) &&
                typeof a.text === 'string') {
       result.push({ id, kind: 'text', x: a.x, y: a.y, text: a.text.slice(0, 60), color: a.color })
     }
   }
   return result
+}
+
+function parseStepNotes(v: unknown): Record<string, string> {
+  const result: Record<string, string> = {}
+  if (!isRecord(v)) return result
+  for (const [key, text] of Object.entries(v)) {
+    if (/^\d+$/.test(key) && typeof text === 'string' && text.trim()) result[key] = text.slice(0, 400)
+  }
+  return result
+}
+
+/** Solo imágenes en data URL y de tamaño razonable. */
+const MAX_BACKGROUND = 3_000_000
+function parseBackground(v: unknown): string | null {
+  return typeof v === 'string' && v.length <= MAX_BACKGROUND && /^data:image\/(jpeg|png|webp);base64,/.test(v) ? v : null
 }
 
 function parseScene(value: unknown, fallbackName: string): Scene | null {
@@ -113,7 +140,7 @@ function parseScene(value: unknown, fallbackName: string): Scene | null {
     for (const side of SIDES) {
       const t = value.teams[side]
       if (!isRecord(t)) continue
-      if (mode.formations.some((f) => f.id === t.formationId)) {
+      if (isFormationId(mode, t.formationId as string)) {
         teams[side].formationId = t.formationId as string
       }
       if (typeof t.visible === 'boolean') teams[side].visible = t.visible
@@ -151,6 +178,8 @@ function parseScene(value: unknown, fallbackName: string): Scene | null {
         ...(typeof info.name === 'string' && { name: info.name.slice(0, 30) }),
         ...(typeof info.role === 'string' && { role: info.role.slice(0, 6) }),
         ...(isNumber(info.size) && info.size >= 0.5 && info.size <= 2 && { size: info.size }),
+        ...(typeof info.squadId === 'string' && { squadId: info.squadId.slice(0, 60) }),
+        ...(typeof info.photo === 'string' && info.photo.startsWith('data:image/') && info.photo.length < 80_000 && { photo: info.photo }),
       }
     }
   }
@@ -167,6 +196,9 @@ function parseScene(value: unknown, fallbackName: string): Scene | null {
     start,
     movements,
     annotations: parseAnnotations(value.annotations),
+    notes: typeof value.notes === 'string' ? value.notes.slice(0, 2000) : '',
+    stepNotes: parseStepNotes(value.stepNotes),
+    background: parseBackground(value.background),
   }
 }
 
@@ -185,6 +217,8 @@ export function parseTactic(value: unknown): Tactic | null {
     name: value.name.trim() || 'Sin nombre',
     scenes,
     savedAt: isNumber(value.savedAt) ? value.savedAt : Date.now(),
+    ...(Array.isArray(value.tags) ? { tags: value.tags.filter((t): t is string => typeof t === 'string').map((t) => t.trim().slice(0, 24)).filter(Boolean).slice(0, 8) } : {}),
+    ...(Array.isArray(value.session) && value.session.length ? { session: parseSession(value.session) } : {}),
   }
 }
 

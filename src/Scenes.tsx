@@ -15,10 +15,12 @@ interface Props {
   /** Otra jugada que se superpone a la actual para compararlas. */
   compareIndex: number | null
   onCompare: (index: number | null) => void
+  compareMode: 'overlay' | 'split'
+  onCompareMode: (mode: 'overlay' | 'split') => void
   onRename: (index: number, name: string) => void
 }
 
-function Scenes({ names, active, disabled, sequencing, onPlayAll, onStopAll, onSelect, onAdd, onContinue, onDelete, onDuplicate, compareIndex, onCompare, onRename }: Props) {
+function Scenes({ names, active, disabled, sequencing, onPlayAll, onStopAll, onSelect, onAdd, onContinue, onDelete, onDuplicate, compareIndex, onCompare, compareMode, onCompareMode, onRename }: Props) {
   return (
     <>
       <h2>Jugadas</h2>
@@ -99,6 +101,12 @@ function Scenes({ names, active, disabled, sequencing, onPlayAll, onStopAll, onS
             )}
           </select>
         </label>
+      )}
+      {names.length > 1 && compareIndex !== null && compareIndex !== active && (
+        <div className="row" role="group" aria-label="Forma de comparar">
+          <button type="button" className={`btn btn-sm${compareMode === 'overlay' ? ' active' : ''}`} aria-pressed={compareMode === 'overlay'} onClick={() => onCompareMode('overlay')}>Superponer</button>
+          <button type="button" className={`btn btn-sm${compareMode === 'split' ? ' active' : ''}`} aria-pressed={compareMode === 'split'} onClick={() => onCompareMode('split')}>Lado a lado</button>
+        </div>
       )}
     </>
   )

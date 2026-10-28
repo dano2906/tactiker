@@ -44,12 +44,12 @@ async function transform(bytes: Uint8Array, stream: CompressionStream | Decompre
 
 /** Redondea los números para acortar el enlace (el tiempo, a milisegundos; las posiciones, a 4 decimales). */
 const slim = (key: string, value: unknown) =>
-  typeof value === 'number' ? (key === 't' ? Math.round(value) : Math.round(value * 10000) / 10000) : value
+  key === 'background' || key === 'photo' ? undefined : typeof value === 'number' ? (key === 't' ? Math.round(value) : Math.round(value * 10000) / 10000) : value
 
 /** Convierte una táctica en un texto apto para una URL: JSON comprimido y en base64. */
 export async function encodeTactic(tactic: Tactic): Promise<string> {
-  const { name, scenes } = tactic
-  const bytes = new TextEncoder().encode(JSON.stringify({ name, scenes }, slim))
+  const { name, scenes, session } = tactic
+  const bytes = new TextEncoder().encode(JSON.stringify({ name, scenes, session }, slim))
   if (typeof CompressionStream === 'undefined') return `j.${toBase64Url(bytes)}`
   return `z.${toBase64Url(await transform(bytes, new CompressionStream('deflate-raw')))}`
 }

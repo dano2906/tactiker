@@ -10,6 +10,7 @@
     "react/only-export-components": "off",
     "react-hooks/exhaustive-deps": "off",
     "react/immutability": "off",
-    "react/purity": "off"
+    "react/purity": "off",
+    "react/refs": "off"
   }
 }

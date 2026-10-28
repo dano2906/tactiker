@@ -2,8 +2,33 @@
 // - Navegación: red primero (para recoger versiones nuevas) y, sin red, la última página guardada.
 // - /assets/: archivos con hash en el nombre, no cambian nunca -> caché primero.
 // - Resto de archivos estáticos: sirve lo guardado y lo actualiza en segundo plano.
-const CACHE = 'tactiker-v2'
+const CACHE = 'tactiker-v3'
 const SHELL = ['/fonts/outfit-400-700.woff2', '/fonts/barlow-condensed-600.woff2', '/fonts/barlow-condensed-700.woff2', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/apple-touch-icon.png']
+
+/**
+ * Los archivos JS cargan otros bajo demanda (`import('./Informe-abc123.js')`): se leen para guardar también
+ * esos, de modo que cualquier función funcione sin conexión desde la primera visita.
+ */
+async function withChunks(urls) {
+  const found = new Set(urls)
+  const queue = urls.filter((u) => u.endsWith('.js'))
+  while (queue.length && found.size < 60) {
+    const url = queue.shift()
+    try {
+      const code = await (await fetch(url)).text()
+      for (const [, name] of code.matchAll(/["'`]\.\/([A-Za-z0-9_.-]+\.js)["'`]/g)) {
+        const next = `/assets/${name}`
+        if (!found.has(next)) {
+          found.add(next)
+          queue.push(next)
+        }
+      }
+    } catch {
+      // un archivo que no se pueda leer no impide instalar el resto
+    }
+  }
+  return [...found]
+}
 
 const assetUrls = (html) => [...html.matchAll(/(?:src|href)="(\/assets\/[^"]+)"/g)].map((m) => m[1])
 
@@ -25,7 +50,8 @@ self.addEventListener('install', (event) => {
       const html = await page.clone().text()
       await cache.put('/', page)
       // Un archivo que falle no debe impedir instalar el resto.
-      await Promise.all([...SHELL, ...assetUrls(html)].map((url) => cache.add(url).catch(() => {})))
+      const assets = await withChunks(assetUrls(html))
+      await Promise.all([...SHELL, ...assets].map((url) => cache.add(url).catch(() => {})))
       await self.skipWaiting()
     })(),
   )
@@ -58,7 +84,7 @@ self.addEventListener('fetch', (event) => {
           }
           return fresh
         } catch {
-          return (await cache.match('/')) ?? Response.error()
+          return (await cache.match('/', { ignoreVary: true })) ?? Response.error()
         }
       })(),
     )
@@ -68,7 +94,7 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     (async () => {
       const cache = await caches.open(CACHE)
-      const cached = await cache.match(request)
+      const cached = await cache.match(request, { ignoreVary: true })
       if (url.pathname.startsWith('/assets/') && cached) return cached
       const update = fetch(request)
         .then((res) => {

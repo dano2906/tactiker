@@ -155,7 +155,18 @@ input[type='text'], input[type='number'], select {
   padding: 0 0.7rem;
   font: 400 0.875rem var(--font-sans);
 }
-input::placeholder { color: var(--muted-foreground); }
+textarea {
+  width: 100%;
+  min-height: 4.5rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--input);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--foreground);
+  font: 400 0.875rem/1.4 var(--font-sans);
+  resize: vertical;
+}
+input::placeholder, textarea::placeholder { color: var(--muted-foreground); }
 input:disabled, select:disabled { opacity: 0.5; }
 select {
   appearance: none;

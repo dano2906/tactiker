@@ -2,13 +2,21 @@ import type { RefObject } from 'preact'
 import { useEffect, useRef } from 'preact/hooks'
 import { hitAnnotation, type Annotation, type Tool } from './annotations'
 import {
-  BALL, DEFAULT_VIEW, HANDLE_R, MAX_ZOOM, clampView, computeGeometry, renderPitchLayer, renderScene,
-  type Analysis, type DragView, type Geometry, type TokenLabel, type View,
+  BALL, DEFAULT_VIEW, setAssetListener, HANDLE_R, MAX_ZOOM, clampView, computeGeometry, fitView, renderPitchLayer, renderScene,
+  type Analysis, type DragView, type Geometry, type Region, type TokenLabel, type View, type ZoneMode,
 } from './draw'
 import type { Mode, Side } from './modes'
+import type { PassNetwork } from './passes'
 import type { Movement, PathPoint, Point, Positions } from './recording'
 
 export type { TokenLabel } from './draw'
+
+/** Datos de una ficha que se muestran al pasar el ratón por encima. */
+export interface TokenInfo {
+  title: string
+  lines: string[]
+  photo?: string
+}
 
 /** Control directo del terreno, sin pasar por el estado (reproducción y zoom). */
 export interface PitchApi {
@@ -16,6 +24,8 @@ export interface PitchApi {
   draw: (positions: Positions, ghost?: Positions | null) => void
   zoomBy: (factor: number) => void
   resetView: () => void
+  /** Encuadra una zona del terreno (medio campo, área…). */
+  fit: (region: Region) => void
 }
 
 interface Props {
@@ -37,6 +47,11 @@ interface Props {
   onEditPath: (index: number, points: Point[]) => void
   measures: boolean
   analysis: Analysis
+  zones: ZoneMode
+  /** Red de pases (`null` = oculta). */
+  network: PassNetwork | null
+  /** Imagen de fondo en lugar del césped. */
+  background: HTMLImageElement | null
   groups: Record<Side, string[][]>
   /** Mapa de calor ya calculado. */
   heat: HTMLCanvasElement | null
@@ -58,6 +73,8 @@ interface Props {
   /** Clic sobre una ficha (fuera de la grabación) o sobre el vacío (`null`). */
   onSelect: (key: string | null) => void
   onZoomChange: (zoom: number) => void
+  /** Datos de la ficha para el cuadro que aparece al pasar el ratón por encima. */
+  describe: (key: string) => TokenInfo | null
 }
 
 interface Drag {
@@ -107,13 +124,13 @@ interface Pinch {
 
 const MAX_DPR = 2
 
-// Identificador de cada mapa de calor, para saber si hay que redibujar la capa estática.
-const heatIds = new WeakMap<HTMLCanvasElement, number>()
-let nextHeatId = 1
-const heatId = (heat: HTMLCanvasElement | null) => {
-  if (!heat) return 0
-  if (!heatIds.has(heat)) heatIds.set(heat, nextHeatId++)
-  return heatIds.get(heat)!
+// Identificador de cada mapa de calor o imagen de fondo, para saber si hay que redibujar la capa estática.
+const objectIds = new WeakMap<object, number>()
+let nextObjectId = 1
+const objectId = (value: object | null) => {
+  if (!value) return 0
+  if (!objectIds.has(value)) objectIds.set(value, nextObjectId++)
+  return objectIds.get(value)!
 }
 
 function Pitch(props: Props) {
@@ -139,6 +156,8 @@ function Pitch(props: Props) {
   const pointersRef = useRef(new Map<number, { x: number; y: number }>())
   const layerRef = useRef<{ key: string; canvas: HTMLCanvasElement } | null>(null)
   const frameRef = useRef(0)
+  const tipRef = useRef<HTMLDivElement>(null)
+  const hoverRef = useRef<string | null>(null)
 
   const paint = () => {
     const wrap = wrapRef.current
@@ -166,14 +185,14 @@ function Pitch(props: Props) {
     geoRef.current = geo
 
     // Capa estática en caché: solo se vuelve a dibujar si cambia el tamaño, la modalidad o el encuadre.
-    const key = `${p.mode.id}|${p.mode.length}|${p.mode.width}|${w}|${h}|${view.zoom.toFixed(3)}|${Math.round(view.panX)}|${Math.round(view.panY)}|${heatId(p.heat)}`
+    const key = `${p.mode.id}|${p.mode.length}|${p.mode.width}|${w}|${h}|${view.zoom.toFixed(3)}|${Math.round(view.panX)}|${Math.round(view.panY)}|${objectId(p.heat)}|${objectId(p.background)}`
     if (layerRef.current?.key !== key) {
       const layer = document.createElement('canvas')
       layer.width = w
       layer.height = h
       const lctx = layer.getContext('2d')!
       lctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      renderPitchLayer(lctx, p.mode, geo, cw, ch, p.heat)
+      renderPitchLayer(lctx, p.mode, geo, cw, ch, p.heat, p.background)
       layerRef.current = { key, canvas: layer }
     }
 
@@ -201,6 +220,8 @@ function Pitch(props: Props) {
       carrier: p.carrier,
       measures: p.measures,
       analysis: p.analysis,
+      zones: p.zones,
+      network: p.network,
       groups: p.groups,
       annotations: p.annotations,
       drawing: drawingRef.current?.annotation ?? null,
@@ -251,10 +272,16 @@ function Pitch(props: Props) {
         zoomAt(factor, wrap.clientWidth / 2, wrap.clientHeight / 2)
       },
       resetView: () => setView(DEFAULT_VIEW),
+      fit: (region) => {
+        const wrap = wrapRef.current!
+        setView(fitView(latest.current.mode, wrap.clientWidth, wrap.clientHeight, region))
+      },
     }
     const observer = new ResizeObserver(paint)
     observer.observe(wrapRef.current!)
+    setAssetListener(requestPaint)
     return () => {
+      setAssetListener(null)
       observer.disconnect()
       cancelAnimationFrame(frameRef.current)
       apiRef.current = null
@@ -270,7 +297,7 @@ function Pitch(props: Props) {
 
   useEffect(requestPaint, [
     mode, props.colors, props.tokens, props.trails, props.selected, props.carrier, props.selectedMovement, props.endMovable,
-    props.measures, props.analysis, props.groups, props.heat, annotations,
+    props.measures, props.analysis, props.zones, props.network, props.groups, props.heat, props.background, annotations,
   ])
 
   const toNormalized = (e: PointerEvent) => {
@@ -417,6 +444,7 @@ function Pitch(props: Props) {
   }
 
   const handleDown = (e: PointerEvent) => {
+    hideHover()
     if (!geoRef.current) return
     pointersRef.current.set(e.pointerId, localPoint(e))
     // Dos dedos sobre el terreno vacío: pellizco para hacer zoom y mover.
@@ -480,7 +508,54 @@ function Pitch(props: Props) {
     requestPaint()
   }
 
+  /** Muestra u oculta el cuadro de datos de la ficha bajo el puntero (solo ratón o lápiz, sin pulsar). */
+  const updateHover = (e: PointerEvent) => {
+    const tip = tipRef.current
+    if (!tip || !geoRef.current) return
+    const key = e.pointerType === 'touch' || e.buttons !== 0 ? null : pick(toNormalized(e), false)
+    if (key !== hoverRef.current) {
+      hoverRef.current = key
+      const info = key ? latest.current.describe(key) : null
+      if (!info) {
+        tip.hidden = true
+        hoverRef.current = null
+        return
+      }
+      const title = document.createElement('strong')
+      title.textContent = info.title
+      const lines = info.lines.map((text) => {
+        const line = document.createElement('span')
+        line.textContent = text
+        return line
+      })
+      if (info.photo) {
+        const photo = document.createElement('img')
+        photo.className = 'tip-photo'
+        photo.alt = ''
+        photo.src = info.photo
+        tip.replaceChildren(photo, title, ...lines)
+      } else {
+        tip.replaceChildren(title, ...lines)
+      }
+      tip.hidden = false
+    }
+    if (!key) return
+    const wrap = wrapRef.current!
+    const at = localPoint(e)
+    let left = at.x + 16
+    let top = at.y + 16
+    if (left + tip.offsetWidth > wrap.clientWidth - 4) left = at.x - tip.offsetWidth - 12
+    if (top + tip.offsetHeight > wrap.clientHeight - 4) top = at.y - tip.offsetHeight - 12
+    tip.style.transform = `translate(${Math.max(4, left)}px, ${Math.max(4, top)}px)`
+  }
+
+  const hideHover = () => {
+    hoverRef.current = null
+    if (tipRef.current) tipRef.current.hidden = true
+  }
+
   const handleMove = (e: PointerEvent) => {
+    updateHover(e)
     if (pointersRef.current.has(e.pointerId)) pointersRef.current.set(e.pointerId, localPoint(e))
     const pinch = pinchRef.current
     if (pinch && pointersRef.current.size >= 2) {
@@ -614,8 +689,10 @@ function Pitch(props: Props) {
         onPointerMove={handleMove}
         onPointerUp={handleUp}
         onPointerCancel={handleUp}
+        onPointerLeave={hideHover}
         onWheel={handleWheel}
       />
+      <div ref={tipRef} className="token-tip glass" role="tooltip" hidden />
     </div>
   )
 }

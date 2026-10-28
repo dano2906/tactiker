@@ -1,5 +1,7 @@
 import type { PlayerInfo } from './roster'
 import Icon from './Icon'
+import { Avatar } from './Avatar'
+import type { SquadPlayer } from './squad'
 
 interface Props {
   title: string
@@ -11,6 +13,9 @@ interface Props {
   /** `null` si se puede quitar la ficha; si no, el motivo. */
   removeBlocked: string | null
   onRemove: () => void
+  squad: SquadPlayer[]
+  /** Vacío = desvincular. */
+  onAssignPlayer: (id: string) => void
   /** Metros que recorre esta ficha en la jugada. */
   distance: number
   carrying: boolean
@@ -23,7 +28,7 @@ interface Props {
 }
 
 function PlayerPanel({
-  title, info, defaultDorsal, defaultRole, disabled, sizeRange, removeBlocked, onRemove, distance, carrying,
+  title, info, defaultDorsal, defaultRole, disabled, sizeRange, removeBlocked, onRemove, squad, onAssignPlayer, distance, carrying,
   giveBallBlocked, onGiveBall, onChange, onReset, onClose,
 }: Props) {
   return (
@@ -32,6 +37,23 @@ function PlayerPanel({
         <strong>{title}</strong>
         <button type="button" className="btn btn-ghost btn-icon btn-sm" aria-label="Cerrar" onClick={onClose}><Icon name="x" /></button>
       </div>
+      {squad.length > 0 && (
+        <label>
+          Jugador del plantel
+          <select value={info.squadId ?? ''} disabled={disabled} onChange={(e) => onAssignPlayer(e.currentTarget.value)}>
+            <option value="">Ninguno</option>
+            {squad.map((p) => (
+              <option key={p.id} value={p.id}>{p.dorsal} {p.name}</option>
+            ))}
+          </select>
+        </label>
+      )}
+      {info.photo && (
+        <div className="row">
+          <Avatar player={{ name: info.name ?? '', photo: info.photo }} />
+          <span className="player-stats">{info.name}</span>
+        </div>
+      )}
       <label>
         Dorsal
         <input

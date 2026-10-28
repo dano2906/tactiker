@@ -8,6 +8,10 @@ export interface PlayerInfo {
   role?: string
   /** Tamaño relativo de la ficha (1 = normal). */
   size?: number
+  /** Jugador del plantel al que está vinculada la ficha. */
+  squadId?: string
+  /** Foto (data URL pequeña) del jugador. */
+  photo?: string
 }
 
 /** Clave de ficha (`${side}-${slot}`) → datos. El slot es el número original en la formación. */
@@ -16,7 +20,7 @@ export type Roster = Record<string, PlayerInfo>
 /** Colores de equipo por defecto: los de los tokens (`--team-red`, `--team-blue`). */
 export const defaultColors = (): Record<Side, string> => ({ left: theme().red, right: theme().blue })
 
-export type LabelMode = 'none' | 'name' | 'role'
+export type LabelMode = 'none' | 'name' | 'role' | 'photo'
 
 /** Posición por defecto según la línea de la formación en la que cae el slot. */
 export function defaultRole(formation: Formation, slot: number): string {
@@ -52,3 +56,15 @@ export function keyTitle(key: string): string {
   if (kind === 'ref') return `Árbitro ${slot}`
   return 'Balón'
 }
+
+/** Colores predefinidos del selector: camisetas habituales. */
+export const COLOR_PRESETS = [
+  { value: '#e0382b', label: 'Rojo' },
+  { value: '#2b66e8', label: 'Azul' },
+  { value: '#1c2530', label: 'Negro' },
+  { value: '#f4f6f8', label: 'Blanco' },
+  { value: '#f4c20d', label: 'Amarillo' },
+  { value: '#2fa84f', label: 'Verde' },
+  { value: '#f28c28', label: 'Naranja' },
+  { value: '#8b5cf6', label: 'Violeta' },
+]
