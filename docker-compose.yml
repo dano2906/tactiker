@@ -1,0 +1,18 @@
+# Desarrollo: Vite con recarga en caliente -> http://localhost:5173
+#   docker compose up --build
+name: tactiker-dev
+
+services:
+  app:
+    build:
+      context: .
+      target: dev
+    ports:
+      - "127.0.0.1:5173:5173"
+    volumes:
+      - .:/app
+      # node_modules del contenedor, para no pisarlo con el del host
+      - /app/node_modules
+    environment:
+      # Necesario para detectar cambios en bind mounts de algunos sistemas (WSL, macOS)
+      CHOKIDAR_USEPOLLING: "true"

@@ -1,0 +1,18 @@
+{
+  "name": "Tactiker — pizarra táctica de fútbol",
+  "short_name": "Tactiker",
+  "description": "Pizarra táctica para fútbol 4, 5, 7 y 11: coloca fichas, graba movimientos y reprodúcelos.",
+  "lang": "es",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#0b1015",
+  "theme_color": "#0b1015",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

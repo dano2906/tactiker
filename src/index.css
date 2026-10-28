@@ -1,0 +1,252 @@
+@font-face {
+  font-family: 'Barlow Condensed';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/barlow-condensed-600.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Barlow Condensed';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/fonts/barlow-condensed-700.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Outfit';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('/fonts/outfit-400-700.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/*
+ * Tokens de diseño: una sola fuente de verdad para escritorio y móvil. Siguen los nombres de shadcn/ui
+ * (background, foreground, primary, muted, border, ring, radius…); el canvas lee los mismos valores
+ * desde `src/theme.ts`, así que cambiar un color aquí lo cambia en toda la app. Los puntos de ruptura
+ * solo cambian la disposición, nunca estos valores.
+ */
+:root {
+  color-scheme: dark;
+
+  --background: #0b1015;
+  --foreground: #eef2f5;
+  --card: rgba(16, 24, 32, 0.78);
+  --popover: #121b24;
+  --primary: #f4c20d;
+  --primary-foreground: #181200;
+  --secondary: rgba(255, 255, 255, 0.07);
+  --secondary-foreground: #eef2f5;
+  --muted: rgba(255, 255, 255, 0.07);
+  --muted-foreground: #93a1ad;
+  --accent: rgba(244, 194, 13, 0.16);
+  --accent-foreground: #f4c20d;
+  --destructive: #ef5350;
+  --border: rgba(255, 255, 255, 0.11);
+  --input: rgba(255, 255, 255, 0.16);
+  --ring: #f4c20d;
+  --radius: 0.6rem;
+
+  /* Terreno y fichas (los usa el canvas) */
+  --pitch: #1d6b3b;
+  --pitch-stripe: #237a45;
+  --pitch-line: rgba(255, 255, 255, 0.88);
+  --team-red: #e0382b;
+  --team-blue: #2b66e8;
+  --neutral: #facc15;
+  --referee: #1c2530;
+
+  --font-sans: 'Outfit', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-display: 'Barlow Condensed', 'Arial Narrow', ui-sans-serif, sans-serif;
+
+  --blur: 14px;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+
+  font: 400 16px/1.45 var(--font-sans);
+  color: var(--foreground);
+  background: var(--background);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--background);
+  overscroll-behavior: none;
+}
+
+#root { min-height: 100dvh; }
+
+h1, h2, h3, p { margin: 0; }
+
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+.ic {
+  width: 1.15em;
+  height: 1.15em;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ---------- componentes (lenguaje visual de shadcn/ui, sin JavaScript) ---------- */
+
+.glass {
+  background: var(--card);
+  border: 1px solid var(--border);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(var(--blur));
+  -webkit-backdrop-filter: blur(var(--blur));
+  border-radius: calc(var(--radius) + 0.3rem);
+}
+
+button { font: inherit; color: inherit; }
+
+button,
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  height: 2.25rem;
+  padding: 0 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font: 500 0.875rem/1 var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s var(--ease);
+}
+button:hover:not(:disabled),
+.btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.13); }
+button:active:not(:disabled),
+.btn:active:not(:disabled) { transform: scale(0.98); }
+button:disabled,
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); font-weight: 600; }
+.btn.btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
+.btn.btn-primary:hover:not(:disabled) { background: #ffd21f; }
+.btn.btn-ghost { background: transparent; border-color: transparent; }
+.btn.btn-ghost:hover:not(:disabled) { background: var(--muted); }
+.btn-ghost { background: transparent; border-color: transparent; }
+.btn-icon { width: 2.25rem; padding: 0; }
+.btn-sm { height: 1.9rem; padding: 0 0.7rem; font-size: 0.8125rem; }
+.btn[aria-pressed='true'], .btn.active { background: var(--accent); border-color: transparent; color: var(--accent-foreground); }
+
+input[type='text'], input[type='number'], select {
+  height: 2.25rem;
+  min-width: 0;
+  border: 1px solid var(--input);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--foreground);
+  padding: 0 0.7rem;
+  font: 400 0.875rem var(--font-sans);
+}
+input::placeholder { color: var(--muted-foreground); }
+input:disabled, select:disabled { opacity: 0.5; }
+select {
+  appearance: none;
+  padding-right: 2rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2393a1ad' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
+}
+select option { background: var(--popover); color: var(--foreground); }
+
+input[type='color'] {
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0.2rem;
+  border: 1px solid var(--input);
+  border-radius: var(--radius);
+  background: transparent;
+  cursor: pointer;
+}
+
+/* Casilla con aspecto de interruptor */
+input[type='checkbox'] {
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 2.4rem;
+  height: 1.35rem;
+  margin: 0;
+  border: 1px solid var(--input);
+  border-radius: 1rem;
+  background: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+input[type='checkbox']::after {
+  content: '';
+  position: absolute;
+  top: 0.15rem;
+  left: 0.17rem;
+  width: 0.9rem;
+  height: 0.9rem;
+  border-radius: 50%;
+  background: var(--foreground);
+  transition: transform 0.15s var(--ease);
+}
+input[type='checkbox']:checked { background: var(--primary); border-color: var(--primary); }
+input[type='checkbox']:checked::after { transform: translateX(1.03rem); background: var(--primary-foreground); }
+input[type='checkbox']:disabled { opacity: 0.45; cursor: not-allowed; }
+
+input[type='range'] { accent-color: var(--primary); min-width: 0; }
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  background: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.tabs { display: flex; gap: 0.2rem; padding: 0.25rem; border-radius: calc(var(--radius) + 0.2rem); background: var(--muted); }
+.tab {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  height: 2rem;
+  padding: 0 0.7rem;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted-foreground);
+  font: 500 0.8125rem/1 var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.tab:hover { color: var(--foreground); }
+.tab[aria-selected='true'] { background: var(--popover); color: var(--foreground); box-shadow: 0 0 0 1px var(--border); }
+.tab .dot { width: 0.4rem; height: 0.4rem; border-radius: 50%; background: var(--primary); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+
+/* los estados de pasar el ratón no deben pisar los de seleccionado */
+.btn[aria-pressed='true']:hover:not(:disabled) { background: var(--accent); }
+.tab:hover:not(:disabled) { background: transparent; }
+.tab[aria-selected='true']:hover:not(:disabled) { background: var(--popover); }
+.tab:active:not(:disabled) { transform: none; }

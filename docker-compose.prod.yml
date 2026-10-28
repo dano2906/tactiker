@@ -1,0 +1,12 @@
+# Producción: la app compilada servida por nginx -> http://localhost:8080
+#   docker compose -f docker-compose.prod.yml up -d --build
+name: tactiker-prod
+
+services:
+  app:
+    build:
+      context: .
+      target: prod
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
